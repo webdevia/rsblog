@@ -1,0 +1,157 @@
+# Production compose for a tiny VPS (1 vCPU, ~560MB RAM, ~440MB available).
+#
+# Usage:
+#   cp .env.prod.example .env   # fill in secrets (never commit .env)
+#   docker compose up -d --build
+#   docker compose logs -f api
+#
+# Memory budget for a 560MB box (~416MB available). Caps are ceilings;
+# typical use is far lower (~200MB: pg ~120, api ~25, caddy ~20), but the
+# caps are chosen so even the worst case fits in available RAM:
+#   postgres 224MB + api 96MB + caddy 64MB = 384MB < 416MB avail.
+# (1GB swap exists as a backstop, but swapping would make everything slow.)
+# Do NOT run `docker compose build` on the 560MB box itself (rustc needs
+# 1GB+ RAM) — build on CI/a bigger machine, push the image, and pin it here
+# via `image:` instead of `build:`.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    # DB port is NOT published: only the api service can reach it.
+    # To inspect locally: docker compose exec postgres psql -U blog_user blog_db
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-blog_user}
+      POSTGRES_DB: ${POSTGRES_DB:-blog_db}
+      # No default: container fails fast if the password is missing.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      # Keep logs small on a tiny disk.
+      POSTGRES_LOG_MIN_DURATION_STATEMENT: ${POSTGRES_LOG_MIN_DURATION_STATEMENT:-1000}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Tuned for ~256MB container: app pool opens max 20 connections.
+    command: >
+      postgres
+      -c shared_buffers=64MB
+      -c effective_cache_size=192MB
+      -c maintenance_work_mem=32MB
+      -c work_mem=2MB
+      -c wal_buffers=2MB
+      -c min_wal_size=32MB
+      -c max_wal_size=256MB
+      -c checkpoint_completion_target=0.9
+      -c max_connections=30
+      -c max_worker_processes=2
+      -c max_parallel_workers=2
+      -c max_parallel_workers_per_gather=1
+      -c log_min_duration_statement=${POSTGRES_LOG_MIN_DURATION_STATEMENT:-1000}
+    # Worst case fits the cap: 64MB shared_buffers + 30 backends × ~4MB +
+    # 32MB maintenance + ~50MB overhead ≈ 206MB < 224MB.
+    mem_limit: 224m
+    mem_reservation: 140m
+    cpus: 0.5
+    # Give postgres time to checkpoint on stop; a killed postmaster means
+    # slow crash recovery on the next (cold, single-CPU) boot.
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-blog_user} -d $${POSTGRES_DB:-blog_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  api:
+    # Works both ways:
+    # - Local/dev: `docker compose up --build` builds and tags this image name.
+    # - VPS: set API_IMAGE=ghcr.io/<owner>/rsblog:latest and just pull + run,
+    #   so the 560MB box never compiles anything (rustc needs 1GB+ RAM).
+    image: ${API_IMAGE:-rsblog-api:latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # Localhost-only: external traffic must go through Caddy (:443).
+    # Direct access would bypass TLS/HSTS and let clients spoof X-Real-IP,
+    # which the rate limiter trusts (Caddy overwrites it).
+    ports:
+      - "127.0.0.1:${APP_PORT:-3000}:3000"
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      # Inside the container the app must bind 0.0.0.0 (repo default is 127.0.0.1).
+      HOST: 0.0.0.0
+      PORT: 3000
+      DATABASE_BACKEND: postgres
+      DATABASE_URL: postgres://${POSTGRES_USER:-blog_user}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-blog_db}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET (64+ chars) in .env}
+      JWT_EXPIRATION_HOURS: ${JWT_EXPIRATION_HOURS:-24}
+      RUST_LOG: ${RUST_LOG:-blog_api=info,tower_http=info,sqlx=warn}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@blog.com}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+    # Rust RSS is ~20-30MB (incl. one ~19MB Argon2 hash workspace);
+    # 96MB leaves room for login bursts without touching swap.
+    mem_limit: 96m
+    mem_reservation: 48m
+    cpus: 0.8
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certs + ACME state MUST persist, otherwise every restart
+      # re-issues certificates and hits Let's Encrypt rate limits.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    # Single static site idles ~15-25MB; 64MB covers TLS handshakes + gzip.
+    mem_limit: 64m
+    mem_reservation: 24m
+    cpus: 0.3
+    healthcheck:
+      # Caddy's admin endpoint listens on localhost inside the container.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  pgdata:
+    driver: local
+  caddy_data:
+    driver: local
+  caddy_config:
+    driver: local

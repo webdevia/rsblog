@@ -1,0 +1,18 @@
+# Keep the build context small: only what `cargo build` needs.
+target/
+.git/
+.gitignore
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.log
+.env
+.env.*
+!.env.example
+!.env.prod.example
+tests/
+test_api.sh
+README.md
+Dockerfile
+docker-compose*.yml

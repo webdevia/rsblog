@@ -5,3 +5,15 @@ compile_error!(
      Use --features sqlite and/or --features postgres. \
      Example: cargo build --no-default-features --features postgres"
 );
+
+pub mod auth;
+pub mod config;
+pub mod db;
+pub mod errors;
+pub mod handlers;
+pub mod models;
+pub mod rate_limiter;
+pub mod repositories;
+pub mod routes;
+pub mod security;
+pub mod validators;

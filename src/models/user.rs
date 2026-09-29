@@ -103,3 +103,45 @@ pub struct LoginRequest {
 pub struct UpdateUserRoleRequest {
     pub role: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn role_parsing_is_case_insensitive() {
+        assert_eq!(Role::from_str("admin"), Role::Admin);
+        assert_eq!(Role::from_str("Admin"), Role::Admin);
+        assert_eq!(Role::from_str("MODERATOR"), Role::Moderator);
+        assert_eq!(Role::from_str("user"), Role::User);
+    }
+
+    #[test]
+    fn unknown_role_falls_back_to_user() {
+        assert_eq!(Role::from_str("superuser"), Role::User);
+        assert_eq!(Role::from_str(""), Role::User);
+    }
+
+    #[test]
+    fn role_permission_hierarchy() {
+        // Admin can do everything.
+        assert!(Role::Admin.has_permission(&Role::Admin));
+        assert!(Role::Admin.has_permission(&Role::Moderator));
+        assert!(Role::Admin.has_permission(&Role::User));
+        // Moderator sits in the middle.
+        assert!(!Role::Moderator.has_permission(&Role::Admin));
+        assert!(Role::Moderator.has_permission(&Role::Moderator));
+        assert!(Role::Moderator.has_permission(&Role::User));
+        // Plain users only pass user-level checks.
+        assert!(!Role::User.has_permission(&Role::Admin));
+        assert!(!Role::User.has_permission(&Role::Moderator));
+        assert!(Role::User.has_permission(&Role::User));
+    }
+
+    #[test]
+    fn role_display_and_serialization() {
+        assert_eq!(Role::Admin.to_string(), "admin");
+        assert_eq!(Role::Moderator.to_string(), "moderator");
+        assert_eq!(serde_json::to_string(&Role::User).unwrap(), "\"user\"");
+    }
+}

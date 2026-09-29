@@ -4,7 +4,13 @@ use axum::{
     routing::{get, post, put, Router},
 };
 
-use crate::{auth::middleware::auth_middleware, config::Config, db::DbPool, handlers::*};
+use crate::{
+    auth::middleware::auth_middleware,
+    config::Config,
+    db::DbPool,
+    handlers::*,
+    security::{cors_layer, security_headers_middleware},
+};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -26,6 +32,17 @@ impl axum::extract::FromRef<AppState> for Config {
 
 pub fn create_router(state: AppState) -> Router {
     let auth_layer = middleware::from_fn_with_state(state.clone(), auth_middleware);
+
+    if state.config.cors_origins.is_empty() {
+        tracing::warn!(
+            "CORS_ORIGINS is unset: reflecting any origin. Set it to a comma-separated \
+             allowlist (e.g. CORS_ORIGINS=https://app.example) to lock down browser access."
+        );
+    } else {
+        tracing::info!("CORS allowlist: {}", state.config.cors_origins.join(", "));
+    }
+    let cors = cors_layer(&state.config.cors_origins);
+    let hardening = middleware::from_fn(security_headers_middleware);
 
     let routes = Router::new()
         // --- Health (Public, no auth, no rate-limit bypass) ---
@@ -87,9 +104,13 @@ pub fn create_router(state: AppState) -> Router {
         );
 
     // Top-level health for load balancers (outside /api/v1), plus versioned one.
+    // Security headers + CORS apply to all of them (they are the app's policy,
+    // not deployment configuration).
     Router::new()
         .route("/health", get(health))
         .nest("/api/v1", routes)
+        .layer(hardening)
+        .layer(cors)
         .with_state(state)
 }
 

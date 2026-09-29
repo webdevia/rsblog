@@ -96,3 +96,48 @@ impl IntoResponse for AppError {
 }
 
 pub type AppResult<T> = Result<T, AppError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status_of(err: AppError) -> StatusCode {
+        err.into_response().status()
+    }
+
+    #[test]
+    fn error_status_codes() {
+        assert_eq!(status_of(AppError::Unauthorized), StatusCode::UNAUTHORIZED);
+        assert_eq!(status_of(AppError::Forbidden), StatusCode::FORBIDDEN);
+        assert_eq!(
+            status_of(AppError::NotFound("gone".into())),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            status_of(AppError::BadRequest("bad".into())),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status_of(AppError::Conflict("dup".into())),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            status_of(AppError::Validation("bad field".into())),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+
+    #[test]
+    fn error_body_shape() {
+        let resp = AppError::NotFound("Post not found".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        // Body is JSON: {"error": {"status": 404, "message": ...}} — shape is
+        // asserted at the HTTP level in the integration tests.
+    }
+
+    #[test]
+    fn anyhow_becomes_internal_server_error() {
+        let err: AppError = anyhow::anyhow!("boom").into();
+        assert_eq!(status_of(err), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+}

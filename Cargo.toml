@@ -15,7 +15,7 @@ axum = { version = "0.8", features = ["macros"] }
 axum-extra = { version = "0.12", features = ["typed-header"] }
 tokio = { version = "1", features = ["full"] }
 tower = { version = "0.5", features = ["full"] }
-tower-http = { version = "0.7", features = ["cors", "trace", "limit", "request-id", "set-header"] }
+tower-http = { version = "0.7", features = ["cors", "trace", "limit", "request-id", "set-header", "timeout"] }
 
 # Database
 sqlx = { version = "0.9", features = ["runtime-tokio", "chrono", "migrate", "uuid"] }
@@ -46,3 +46,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 # Highly performant rate limiter
 governor = { version = "0.10", features = ["std", "jitter"] }
+
+[dev-dependencies]
+# HTTP client for end-to-end tests (plain HTTP only, no TLS backend needed)
+reqwest = { version = "0.12", default-features = false, features = ["json"] }

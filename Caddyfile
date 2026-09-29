@@ -1,0 +1,35 @@
+# Caddy edge proxy: automatic HTTPS (Let's Encrypt), HSTS, and forwarding
+# to the api service. Requires DOMAIN and ACME_EMAIL in `.env`
+# (see `.env.prod.example`).
+#
+# The app already emits the other security headers itself; HSTS lives here
+# because it is only meaningful once TLS is terminated.
+
+{
+	# Use Caddy's own IP detection against the real client IP for its logs.
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
+{$DOMAIN} {
+	tls {$ACME_EMAIL}
+
+	encode gzip
+
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains"
+		-Server
+	}
+
+	# Backend health endpoint stays reachable through the proxy.
+	reverse_proxy api:3000 {
+		# Overwrite (never append): the client cannot spoof these because
+		# Caddy sets them from the peer it actually sees. The api port is
+		# bound to localhost, so external traffic can only arrive via Caddy.
+		header_up Host {host}
+		header_up X-Real-IP {remote}
+		header_up X-Forwarded-For {remote}
+		header_up X-Forwarded-Proto {scheme}
+	}
+}

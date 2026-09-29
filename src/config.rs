@@ -88,6 +88,8 @@ pub struct Config {
     pub admin_username: String,
     pub admin_email: String,
     pub admin_password: Option<String>,
+    /// Empty = reflect any origin (previous behaviour, logs a warning).
+    pub cors_origins: Vec<String>,
 }
 
 impl Config {
@@ -151,6 +153,60 @@ impl Config {
             admin_username: env::var("ADMIN_USERNAME").unwrap_or_else(|_| "admin".to_string()),
             admin_email: env::var("ADMIN_EMAIL").unwrap_or_else(|_| "admin@blog.com".to_string()),
             admin_password,
+            cors_origins: crate::security::parse_cors_origins(
+                env::var("CORS_ORIGINS").ok().as_deref(),
+            ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backend_from_str() {
+        #[cfg(feature = "sqlite")]
+        assert_eq!(
+            DatabaseBackend::from_str("sqlite").unwrap().to_string(),
+            "sqlite"
+        );
+        #[cfg(feature = "postgres")]
+        assert_eq!(
+            DatabaseBackend::from_str("PostgreSQL").unwrap().to_string(),
+            "postgres"
+        );
+        assert!(DatabaseBackend::from_str("mysql").is_err());
+    }
+
+    #[test]
+    fn backend_from_url_scheme() {
+        #[cfg(feature = "sqlite")]
+        assert_eq!(
+            DatabaseBackend::from_url("sqlite://blog.db?mode=rwc").map(|b| b.to_string()),
+            Some("sqlite".to_string())
+        );
+        #[cfg(feature = "postgres")]
+        {
+            assert_eq!(
+                DatabaseBackend::from_url("postgres://u:p@localhost/db").map(|b| b.to_string()),
+                Some("postgres".to_string())
+            );
+            assert_eq!(
+                DatabaseBackend::from_url("postgresql://u:p@localhost/db").map(|b| b.to_string()),
+                Some("postgres".to_string())
+            );
+        }
+        assert_eq!(DatabaseBackend::from_url("mysql://localhost/db"), None);
+    }
+
+    #[test]
+    fn available_backends_matches_compiled_features() {
+        let backends = DatabaseBackend::available_backends();
+        #[cfg(feature = "sqlite")]
+        assert!(backends.contains(&"sqlite"));
+        #[cfg(feature = "postgres")]
+        assert!(backends.contains(&"postgres"));
+        assert!(!backends.is_empty());
     }
 }

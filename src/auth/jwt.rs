@@ -43,3 +43,41 @@ pub fn verify_token(token: &str, secret: &str) -> AppResult<TokenData<Claims>> {
     )
     .map_err(AppError::Jwt)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SECRET: &str = "test-secret-that-is-long-enough-for-hs256";
+
+    #[test]
+    fn create_and_verify_roundtrip() {
+        let token = create_token("user-1", "alice", "admin", SECRET, 24).unwrap();
+        let claims = verify_token(&token, SECRET).unwrap().claims;
+        assert_eq!(claims.sub, "user-1");
+        assert_eq!(claims.username, "alice");
+        assert_eq!(claims.role, "admin");
+        assert!(claims.exp > claims.iat);
+    }
+
+    #[test]
+    fn wrong_secret_is_rejected() {
+        let token = create_token("user-1", "alice", "user", SECRET, 24).unwrap();
+        let err = verify_token(&token, "a-different-secret-that-is-long").unwrap_err();
+        assert!(matches!(err, AppError::Jwt(_)));
+    }
+
+    #[test]
+    fn malformed_token_is_rejected() {
+        let err = verify_token("not.a.jwt", SECRET).unwrap_err();
+        assert!(matches!(err, AppError::Jwt(_)));
+    }
+
+    #[test]
+    fn expired_token_is_rejected() {
+        // Negative lifetime => `exp` already in the past.
+        let token = create_token("user-1", "alice", "user", SECRET, -1).unwrap();
+        let err = verify_token(&token, SECRET).unwrap_err();
+        assert!(matches!(err, AppError::Jwt(_)));
+    }
+}

@@ -5,22 +5,12 @@ compile_error!(
      Use: --features sqlite  or  --features postgres  or  --features all-databases"
 );
 
-mod auth;
-mod config;
-mod db;
-mod errors;
-mod handlers;
-mod models;
-mod rate_limiter;
-mod repositories;
-mod routes;
-mod validators;
-
 use std::net::SocketAddr;
-use tower_http::{cors::CorsLayer, limit::RequestBodyLimitLayer, trace::TraceLayer};
+use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::{
+use blog_api::{
+    auth,
     config::{Config, DatabaseBackend},
     db::DbPool,
     rate_limiter::{rate_limit_middleware, RateLimiterState},
@@ -56,23 +46,13 @@ async fn main() {
 
     let app = create_router(state)
         .layer(TraceLayer::new_for_http())
-        .layer(
-            CorsLayer::new()
-                .allow_origin(tower_http::cors::Any)
-                .allow_methods([
-                    axum::http::Method::GET,
-                    axum::http::Method::POST,
-                    axum::http::Method::PUT,
-                    axum::http::Method::DELETE,
-                    axum::http::Method::OPTIONS,
-                ])
-                .allow_headers([
-                    axum::http::header::CONTENT_TYPE,
-                    axum::http::header::AUTHORIZATION,
-                ])
-                .max_age(std::time::Duration::from_secs(3600)),
-        )
         .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024))
+        // Bound total handler time so one slow request can't hold a
+        // connection (and a DB pool slot) forever. 408 on expiry.
+        .layer(TimeoutLayer::with_status_code(
+            axum::http::StatusCode::REQUEST_TIMEOUT,
+            std::time::Duration::from_secs(30),
+        ))
         // Apply our custom IP rate limiter middleware
         .layer(axum::middleware::from_fn_with_state(
             rate_limiter_state,
