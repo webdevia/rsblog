@@ -68,3 +68,16 @@ pub async fn deactivate_user(
     user_repo::deactivate(&pool, &user_id).await?;
     Ok(Json(serde_json::json!({"message": "User deactivated"})))
 }
+
+pub async fn activate_user(
+    State(pool): State<DbPool>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(user_id): Path<String>,
+) -> AppResult<Json<serde_json::Value>> {
+    require_role(&auth_user, Role::Admin)?;
+    if auth_user.id == user_id {
+        return Err(AppError::BadRequest("Cannot activate yourself".into()));
+    }
+    user_repo::activate(&pool, &user_id).await?;
+    Ok(Json(serde_json::json!({"message": "User activated"})))
+}

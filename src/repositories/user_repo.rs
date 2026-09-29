@@ -90,6 +90,20 @@ pub async fn deactivate(pool: &DbPool, id: &str) -> AppResult<u64> {
     Ok(rows)
 }
 
+pub async fn activate(pool: &DbPool, id: &str) -> AppResult<u64> {
+    let rows = db_query!(pool, |p| {
+        sqlx::query(
+            "UPDATE users SET is_active = TRUE, updated_at = CURRENT_TIMESTAMP WHERE id = $1",
+        )
+        .bind(id)
+        .execute(p)
+        .await?
+        .rows_affected()
+    });
+    Ok(rows)
+}
+
+
 pub async fn count_admins(pool: &DbPool) -> AppResult<i64> {
     let count = db_query!(pool, |p| {
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users WHERE role = 'admin'")

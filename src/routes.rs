@@ -101,6 +101,10 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/admin/users/{id}/deactivate",
             post(user_handler::deactivate_user.layer(auth_layer.clone())),
+        )
+        .route(
+            "/admin/users/{id}/activate",
+            post(user_handler::activate_user.layer(auth_layer.clone())),
         );
 
     // Top-level health for load balancers (outside /api/v1), plus versioned one.

@@ -55,9 +55,9 @@ pub async fn login(
     validate_request(&req)?;
     let user = user_repo::find_by_username(&pool, &req.username)
         .await?
-        .ok_or(AppError::Unauthorized)?;
+        .ok_or(AppError::InvalidCredentials)?;
     if !verify_password(&req.password, &user.password_hash)? {
-        return Err(AppError::Unauthorized);
+        return Err(AppError::InvalidCredentials);
     }
     let token = create_token(
         &user.id,
