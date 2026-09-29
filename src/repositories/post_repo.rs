@@ -1,0 +1,264 @@
+use crate::{db::DbPool, db_query, errors::AppResult, models::post::*};
+
+pub async fn create(
+    pool: &DbPool,
+    id: &str,
+    title: &str,
+    slug: &str,
+    content: &str,
+    excerpt: Option<&str>,
+    published: bool,
+    author_id: &str,
+) -> AppResult<()> {
+    db_query!(pool, |p| {
+        sqlx::query(
+            "INSERT INTO posts (id, title, slug, content, excerpt, published, author_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(id)
+        .bind(title)
+        .bind(slug)
+        .bind(content)
+        .bind(excerpt)
+        .bind(published)
+        .bind(author_id)
+        .execute(p)
+        .await?;
+    });
+    Ok(())
+}
+
+pub async fn find_by_id(pool: &DbPool, id: &str) -> AppResult<Option<Post>> {
+    let post = db_query!(pool, |p| {
+        sqlx::query_as::<_, Post>(
+            "SELECT id, title, slug, content, excerpt, \
+             CAST(published AS BOOLEAN) as published, author_id, \
+             CAST(created_at AS TEXT) as created_at, \
+             CAST(updated_at AS TEXT) as updated_at \
+             FROM posts WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(p)
+        .await?
+    });
+    Ok(post)
+}
+
+pub async fn find_by_slug(
+    pool: &DbPool,
+    slug: &str,
+    published_only: bool,
+) -> AppResult<Option<Post>> {
+    let sql = if published_only {
+        "SELECT id, title, slug, content, excerpt, \
+         CAST(published AS BOOLEAN) as published, author_id, \
+         CAST(created_at AS TEXT) as created_at, \
+         CAST(updated_at AS TEXT) as updated_at \
+         FROM posts WHERE slug = $1 AND published = TRUE"
+    } else {
+        "SELECT id, title, slug, content, excerpt, \
+         CAST(published AS BOOLEAN) as published, author_id, \
+         CAST(created_at AS TEXT) as created_at, \
+         CAST(updated_at AS TEXT) as updated_at \
+         FROM posts WHERE slug = $1"
+    };
+    let post = db_query!(pool, |p| {
+        sqlx::query_as::<_, Post>(sql)
+            .bind(slug)
+            .fetch_optional(p)
+            .await?
+    });
+    Ok(post)
+}
+
+pub async fn slug_exists(pool: &DbPool, slug: &str) -> AppResult<bool> {
+    let count = db_query!(pool, |p| {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM posts WHERE slug = $1")
+            .bind(slug)
+            .fetch_one(p)
+            .await?
+    });
+    Ok(count > 0)
+}
+
+pub async fn update(
+    pool: &DbPool,
+    id: &str,
+    title: &str,
+    slug: &str,
+    content: &str,
+    excerpt: Option<&str>,
+    published: bool,
+) -> AppResult<()> {
+    db_query!(pool, |p| {
+        sqlx::query(
+            "UPDATE posts SET title=$1, slug=$2, content=$3, excerpt=$4, published=$5, \
+             updated_at=CURRENT_TIMESTAMP WHERE id=$6",
+        )
+        .bind(title)
+        .bind(slug)
+        .bind(content)
+        .bind(excerpt)
+        .bind(published)
+        .bind(id)
+        .execute(p)
+        .await?;
+    });
+    Ok(())
+}
+
+pub async fn delete(pool: &DbPool, id: &str) -> AppResult<()> {
+    db_query!(pool, |p| {
+        sqlx::query("DELETE FROM posts WHERE id = $1")
+            .bind(id)
+            .execute(p)
+            .await?;
+    });
+    Ok(())
+}
+
+pub async fn attach_tag(pool: &DbPool, post_id: &str, tag_id: &str) -> AppResult<()> {
+    db_query!(pool, |p| {
+        sqlx::query(
+            "INSERT INTO post_tags (post_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        )
+        .bind(post_id)
+        .bind(tag_id)
+        .execute(p)
+        .await?;
+    });
+    Ok(())
+}
+
+pub async fn clear_tags(pool: &DbPool, post_id: &str) -> AppResult<()> {
+    db_query!(pool, |p| {
+        sqlx::query("DELETE FROM post_tags WHERE post_id = $1")
+            .bind(post_id)
+            .execute(p)
+            .await?;
+    });
+    Ok(())
+}
+
+pub async fn get_tags(pool: &DbPool, post_id: &str) -> AppResult<Vec<TagInfo>> {
+    let tags = db_query!(pool, |p| {
+        sqlx::query_as::<_, TagInfo>(
+            "SELECT t.id, t.name, t.slug FROM tags t \
+             JOIN post_tags pt ON t.id = pt.tag_id WHERE pt.post_id = $1",
+        )
+        .bind(post_id)
+        .fetch_all(p)
+        .await?
+    });
+    Ok(tags)
+}
+
+pub async fn get_author(pool: &DbPool, author_id: &str) -> AppResult<PostAuthor> {
+    let author = db_query!(pool, |p| {
+        sqlx::query_as::<_, PostAuthor>("SELECT id, username FROM users WHERE id = $1")
+            .bind(author_id)
+            .fetch_one(p)
+            .await?
+    });
+    Ok(author)
+}
+
+pub async fn comment_count(pool: &DbPool, post_id: &str) -> AppResult<i64> {
+    let count = db_query!(pool, |p| {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM comments WHERE post_id = $1 AND is_deleted = FALSE",
+        )
+        .bind(post_id)
+        .fetch_one(p)
+        .await?
+    });
+    Ok(count)
+}
+
+pub async fn list(
+    pool: &DbPool,
+    published_only: bool,
+    author: Option<&str>,
+    tag: Option<&str>,
+    search: Option<&str>,
+    page: i64,
+    per_page: i64,
+) -> AppResult<(Vec<PostRow>, i64)> {
+    let offset = (page - 1) * per_page;
+
+    let mut conditions = Vec::new();
+    let mut params: Vec<String> = Vec::new();
+    let mut idx = 0usize;
+
+    if published_only {
+        conditions.push("p.published = TRUE".to_string());
+    }
+    if let Some(a) = author {
+        idx += 1;
+        conditions.push(format!("u.username = ${idx}"));
+        params.push(a.to_string());
+    }
+    if let Some(t) = tag {
+        idx += 1;
+        conditions.push(format!(
+            "p.id IN (SELECT pt.post_id FROM post_tags pt JOIN tags tg ON pt.tag_id = tg.id WHERE tg.slug = ${idx} OR tg.name = ${idx})"
+        ));
+        params.push(t.to_string());
+    }
+    if let Some(s) = search {
+        let pat = format!("%{s}%");
+        idx += 1;
+        let i1 = idx;
+        idx += 1;
+        let i2 = idx;
+        conditions.push(format!("(p.title LIKE ${i1} OR p.content LIKE ${i2})"));
+        params.push(pat.clone());
+        params.push(pat);
+    }
+
+    let where_clause = if conditions.is_empty() {
+        "TRUE".to_string()
+    } else {
+        conditions.join(" AND ")
+    };
+
+    let count_sql = format!(
+        "SELECT COUNT(DISTINCT p.id) FROM posts p JOIN users u ON p.author_id = u.id WHERE {where_clause}"
+    );
+
+    idx += 1;
+    let limit_idx = idx;
+    idx += 1;
+    let offset_idx = idx;
+
+    let data_sql = format!(
+        "SELECT p.id, p.title, p.slug, p.excerpt, \
+         CAST(p.published AS BOOLEAN) as published, \
+         p.author_id, u.username as author_username, \
+         CAST(p.created_at AS TEXT) as created_at, \
+         (SELECT COUNT(*) FROM comments c WHERE c.post_id = p.id AND c.is_deleted = FALSE) as comment_count \
+         FROM posts p JOIN users u ON p.author_id = u.id \
+         WHERE {where_clause} \
+         ORDER BY p.created_at DESC \
+         LIMIT ${limit_idx} OFFSET ${offset_idx}"
+    );
+
+    let (rows, total) = db_query!(pool, |p| {
+        let mut cq = sqlx::query_scalar::<_, i64>(&count_sql);
+        for v in &params {
+            cq = cq.bind(v);
+        }
+        let total = cq.fetch_one(p).await?;
+
+        let mut dq = sqlx::query_as::<_, PostRow>(&data_sql);
+        for v in &params {
+            dq = dq.bind(v);
+        }
+        dq = dq.bind(per_page).bind(offset);
+        let rows = dq.fetch_all(p).await?;
+
+        (rows, total)
+    });
+
+    Ok((rows, total))
+}

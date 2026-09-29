@@ -1,0 +1,48 @@
+[package]
+name = "blog-api"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["sqlite"]
+sqlite = ["sqlx/sqlite"]
+postgres = ["sqlx/postgres"]
+all-databases = ["sqlite", "postgres"]
+
+[dependencies]
+# Web framework
+axum = { version = "0.8", features = ["macros"] }
+axum-extra = { version = "0.10", features = ["typed-header"] }
+tokio = { version = "1.44", features = ["full"] }
+tower = { version = "0.5", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "limit", "request-id", "set-header"] }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "chrono", "migrate", "uuid"] }
+
+# Auth
+jsonwebtoken = "9.3"
+argon2 = "0.5"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Validation
+validator = { version = "0.19", features = ["derive"] }
+
+# Config & Error Handling
+dotenvy = "0.15"
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Utils
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.11", features = ["v4", "serde"] }
+
+# Highly performant rate limiter
+governor = { version = "0.7", features = ["std", "jitter"] }
