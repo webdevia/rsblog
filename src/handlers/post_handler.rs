@@ -1,13 +1,15 @@
 use crate::{
-    auth::middleware::AuthUser,
+    auth::{jwt::verify_token, middleware::AuthUser},
+    config::Config,
     db::DbPool,
     errors::{AppError, AppResult},
     models::{post::*, user::Role},
-    repositories::post_repo,
+    repositories::{post_repo, user_repo},
     validators::{slugify, validate_request},
 };
 use axum::{
     extract::{Extension, Path, Query, State},
+    http::{header::AUTHORIZATION, HeaderMap},
     Json,
 };
 
@@ -64,8 +66,10 @@ pub async fn list_posts(
     .await?;
 
     let mut posts = Vec::with_capacity(rows.len());
+    let post_ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
+    let tags_map = post_repo::get_tags_for_posts(&pool, &post_ids).await?;
     for row in rows {
-        let tags = post_repo::get_tags(&pool, &row.id).await?;
+        let tags = tags_map.get(&row.id).cloned().unwrap_or_default();
         posts.push(PostSummary {
             id: row.id,
             title: row.title,
@@ -92,25 +96,58 @@ pub async fn list_posts(
 
 pub async fn get_post(
     State(pool): State<DbPool>,
-    Path(id): Path<String>, // Unified matching parameter
+    State(config): State<Config>,
+    Path(key): Path<String>,
+    headers: HeaderMap,
 ) -> AppResult<Json<PostResponse>> {
-    // Looks up via slug (for friendly URLs)
-    let post = post_repo::find_by_slug(&pool, &id, true)
+    let post = post_repo::find_by_id_or_slug(&pool, &key)
         .await?
         .ok_or_else(|| AppError::NotFound("Post not found".into()))?;
-    build_post_response_from_post(&pool, &post).await
+
+    if post.published {
+        return build_post_response_from_post(&pool, &post).await;
+    }
+
+    // Draft: require owner or moderator (optional auth).
+    let viewer = try_auth_from_headers(&pool, &config, &headers).await;
+    match viewer {
+        Some(u) if u.id == post.author_id || u.role.has_permission(&Role::Moderator) => {
+            build_post_response_from_post(&pool, &post).await
+        }
+        _ => Err(AppError::NotFound("Post not found".into())),
+    }
+}
+
+async fn try_auth_from_headers(
+    pool: &DbPool,
+    config: &Config,
+    headers: &HeaderMap,
+) -> Option<AuthUser> {
+    let header = headers.get(AUTHORIZATION)?.to_str().ok()?;
+    let token = header.strip_prefix("Bearer ")?;
+    let claims = verify_token(token, &config.jwt_secret).ok()?.claims;
+    let user = user_repo::find_by_id(pool, &claims.sub).await.ok()??;
+    if !user.is_active {
+        return None;
+    }
+    Some(AuthUser {
+        id: user.id.clone(),
+        username: user.username.clone(),
+        role: Role::from_str(&user.role),
+    })
 }
 
 pub async fn update_post(
     State(pool): State<DbPool>,
     Extension(auth_user): Extension<AuthUser>,
-    Path(id): Path<String>,
+    Path(key): Path<String>,
     Json(req): Json<UpdatePostRequest>,
 ) -> AppResult<Json<PostResponse>> {
     validate_request(&req)?;
-    let post = post_repo::find_by_id(&pool, &id)
+    let post = post_repo::find_by_id_or_slug(&pool, &key)
         .await?
         .ok_or_else(|| AppError::NotFound("Post not found".into()))?;
+    let post_id = post.id.clone();
 
     if post.author_id != auth_user.id && !auth_user.role.has_permission(&Role::Moderator) {
         return Err(AppError::Forbidden);
@@ -120,11 +157,16 @@ pub async fn update_post(
     let content = req.content.unwrap_or(post.content);
     let excerpt = req.excerpt.or(post.excerpt);
     let published = req.published.unwrap_or(post.published);
-    let new_slug = slugify(&title);
+    let mut new_slug = slugify(&title);
+    // Avoid UNIQUE violation when retitling to an existing slug.
+    if new_slug != post.slug && post_repo::slug_exists_excluding(&pool, &new_slug, &post_id).await?
+    {
+        new_slug = format!("{}-{}", new_slug, &post_id[..8.min(post_id.len())]);
+    }
 
     post_repo::update(
         &pool,
-        &id,
+        &post_id,
         &title,
         &new_slug,
         &content,
@@ -134,21 +176,21 @@ pub async fn update_post(
     .await?;
 
     if let Some(tag_ids) = req.tag_ids {
-        post_repo::clear_tags(&pool, &id).await?;
+        post_repo::clear_tags(&pool, &post_id).await?;
         for tid in &tag_ids {
-            post_repo::attach_tag(&pool, &id, tid).await?;
+            post_repo::attach_tag(&pool, &post_id, tid).await?;
         }
     }
 
-    build_post_response(&pool, &id).await
+    build_post_response(&pool, &post_id).await
 }
 
 pub async fn delete_post(
     State(pool): State<DbPool>,
     Extension(auth_user): Extension<AuthUser>,
-    Path(id): Path<String>,
+    Path(key): Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let post = post_repo::find_by_id(&pool, &id)
+    let post = post_repo::find_by_id_or_slug(&pool, &key)
         .await?
         .ok_or_else(|| AppError::NotFound("Post not found".into()))?;
 
@@ -156,7 +198,7 @@ pub async fn delete_post(
         return Err(AppError::Forbidden);
     }
 
-    post_repo::delete(&pool, &id).await?;
+    post_repo::delete(&pool, &post.id).await?;
     Ok(Json(serde_json::json!({"message": "Post deleted"})))
 }
 

@@ -14,14 +14,10 @@ mod models;
 mod rate_limiter;
 mod repositories;
 mod routes;
-mod validators; // Custom rate limiter module
+mod validators;
 
 use std::net::SocketAddr;
-use tower_http::{
-    cors::{Any, CorsLayer},
-    limit::RequestBodyLimitLayer,
-    trace::TraceLayer,
-};
+use tower_http::{cors::CorsLayer, limit::RequestBodyLimitLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::{
@@ -48,7 +44,7 @@ async fn main() {
 
     let config = Config::from_env();
     let pool = DbPool::init(&config).await;
-    seed_admin(&pool).await;
+    seed_admin(&pool, &config).await;
 
     let state = AppState {
         pool,
@@ -62,9 +58,19 @@ async fn main() {
         .layer(TraceLayer::new_for_http())
         .layer(
             CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
+                .allow_origin(tower_http::cors::Any)
+                .allow_methods([
+                    axum::http::Method::GET,
+                    axum::http::Method::POST,
+                    axum::http::Method::PUT,
+                    axum::http::Method::DELETE,
+                    axum::http::Method::OPTIONS,
+                ])
+                .allow_headers([
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::header::AUTHORIZATION,
+                ])
+                .max_age(std::time::Duration::from_secs(3600)),
         )
         .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024))
         // Apply our custom IP rate limiter middleware
@@ -73,16 +79,46 @@ async fn main() {
             rate_limit_middleware,
         ));
 
-    let addr: SocketAddr = format!("{}:{}", config.host, config.port).parse().unwrap();
+    let addr: SocketAddr = format!("{}:{}", config.host, config.port)
+        .parse()
+        .expect("Invalid HOST/PORT combination");
     tracing::info!("🚀 Server running on http://{addr}");
 
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .expect("Failed to bind address");
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
+    .with_graceful_shutdown(shutdown_signal())
     .await
-    .unwrap();
+    .expect("Server error");
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("Failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+    tracing::info!("Shutdown signal received, starting graceful shutdown");
 }
 
 fn print_build_info() {
@@ -94,11 +130,30 @@ fn print_build_info() {
     tracing::info!("╚══════════════════════════════════════════════════╝");
 }
 
-async fn seed_admin(pool: &DbPool) {
+async fn seed_admin(pool: &DbPool, config: &Config) {
     if user_repo::count_admins(pool).await.unwrap_or(0) == 0 {
-        let hash = auth::password::hash_password("Admin@123456").unwrap();
-        let id = uuid::Uuid::new_v4().to_string();
-        user_repo::create_admin(pool, &id, &hash).await.ok();
-        tracing::info!("✅ Admin seeded (username: admin, password: Admin@123456)");
+        let Some(ref admin_password) = config.admin_password else {
+            tracing::info!(
+                "No admin exists and ADMIN_PASSWORD is unset — skipping admin seeding. Set ADMIN_PASSWORD (>=12 chars) to create '{}'.",
+                config.admin_username
+            );
+            return;
+        };
+        match auth::password::hash_password(admin_password) {
+            Ok(hash) => {
+                let id = uuid::Uuid::new_v4().to_string();
+                user_repo::create_admin(
+                    pool,
+                    &id,
+                    &config.admin_username,
+                    &config.admin_email,
+                    &hash,
+                )
+                .await
+                .ok();
+                tracing::info!("✅ Admin '{}' seeded", config.admin_username);
+            }
+            Err(e) => tracing::error!("Failed to hash admin password: {e}"),
+        }
     }
 }

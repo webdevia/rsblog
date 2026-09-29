@@ -9,20 +9,34 @@ pub async fn create(pool: &DbPool, id: &str, name: &str, slug: &str) -> AppResul
             .execute(p)
             .await?;
     });
-    find_by_id(pool, id).await
+    find_by_id(pool, id)
+        .await?
+        .ok_or_else(|| crate::errors::AppError::NotFound("Tag not found".into()))
 }
 
-pub async fn find_by_id(pool: &DbPool, id: &str) -> AppResult<Tag> {
+pub async fn find_by_id(pool: &DbPool, id: &str) -> AppResult<Option<Tag>> {
     let tag =
         db_query!(pool, |p| {
             sqlx::query_as::<_, Tag>(
             "SELECT id, name, slug, CAST(created_at AS TEXT) as created_at FROM tags WHERE id = $1"
         )
-        .bind(id).fetch_one(p).await?
+        .bind(id).fetch_optional(p).await?
         });
     Ok(tag)
 }
 
+/// Single-query lookup by slug or id (avoids double round-trip).
+pub async fn find_by_id_or_slug(pool: &DbPool, key: &str) -> AppResult<Option<Tag>> {
+    let tag = db_query!(pool, |p| {
+        sqlx::query_as::<_, Tag>(
+            "SELECT id, name, slug, CAST(created_at AS TEXT) as created_at FROM tags WHERE slug = $1 OR id = $1"
+        )
+        .bind(key).fetch_optional(p).await?
+    });
+    Ok(tag)
+}
+
+#[allow(dead_code)]
 pub async fn find_by_slug(pool: &DbPool, slug: &str) -> AppResult<Option<Tag>> {
     let tag = db_query!(pool, |p| {
         sqlx::query_as::<_, Tag>(

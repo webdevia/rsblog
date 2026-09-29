@@ -25,6 +25,7 @@ impl DatabaseBackend {
     }
 
     /// Lists backends compiled into this binary
+    #[allow(clippy::vec_init_then_push)]
     pub fn available_backends() -> Vec<&'static str> {
         let mut list = Vec::new();
         #[cfg(feature = "sqlite")]
@@ -84,6 +85,9 @@ pub struct Config {
     pub jwt_expiration_hours: i64,
     pub host: String,
     pub port: u16,
+    pub admin_username: String,
+    pub admin_email: String,
+    pub admin_password: Option<String>,
 }
 
 impl Config {
@@ -114,19 +118,39 @@ impl Config {
             DatabaseBackend::available_backends().join(", ")
         );
 
+        let jwt_secret = env::var("JWT_SECRET").expect("JWT_SECRET must be set");
+        if jwt_secret.len() < 32 {
+            panic!("JWT_SECRET must be at least 32 chars (64+ recommended for HS256)");
+        }
+
+        let jwt_expiration_hours: i64 = env::var("JWT_EXPIRATION_HOURS")
+            .unwrap_or_else(|_| "24".to_string())
+            .parse()
+            .expect("JWT_EXPIRATION_HOURS must be a number");
+        if !(1..=720).contains(&jwt_expiration_hours) {
+            panic!("JWT_EXPIRATION_HOURS must be between 1 and 720");
+        }
+
+        let admin_password = env::var("ADMIN_PASSWORD").ok().filter(|s| !s.is_empty());
+        if let Some(ref pw) = admin_password {
+            if pw.len() < 12 {
+                panic!("ADMIN_PASSWORD must be at least 12 chars when set");
+            }
+        }
+
         Self {
             database_url,
             database_backend,
-            jwt_secret: env::var("JWT_SECRET").expect("JWT_SECRET must be set"),
-            jwt_expiration_hours: env::var("JWT_EXPIRATION_HOURS")
-                .unwrap_or_else(|_| "24".to_string())
-                .parse()
-                .expect("JWT_EXPIRATION_HOURS must be a number"),
+            jwt_secret,
+            jwt_expiration_hours,
             host: env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string()),
             port: env::var("PORT")
                 .unwrap_or_else(|_| "3000".to_string())
                 .parse()
                 .expect("PORT must be a number"),
+            admin_username: env::var("ADMIN_USERNAME").unwrap_or_else(|_| "admin".to_string()),
+            admin_email: env::var("ADMIN_EMAIL").unwrap_or_else(|_| "admin@blog.com".to_string()),
+            admin_password,
         }
     }
 }

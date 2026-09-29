@@ -1,5 +1,6 @@
 use crate::{db::DbPool, db_query, errors::AppResult, models::comment::*};
 
+#[allow(clippy::too_many_arguments)]
 pub async fn create(
     pool: &DbPool,
     id: &str,
@@ -71,7 +72,7 @@ pub async fn list_for_post(pool: &DbPool, post_id: &str) -> AppResult<Vec<Commen
              CAST(c.created_at AS TEXT) as created_at, \
              CAST(c.updated_at AS TEXT) as updated_at \
              FROM comments c JOIN users u ON c.author_id = u.id \
-             WHERE c.post_id = $1 ORDER BY c.path, c.created_at ASC",
+             WHERE c.post_id = $1 ORDER BY c.created_at ASC, c.id ASC",
         )
         .bind(post_id)
         .fetch_all(p)
@@ -126,6 +127,7 @@ pub async fn has_children(pool: &DbPool, id: &str) -> AppResult<bool> {
     Ok(count > 0)
 }
 
+#[allow(dead_code)]
 pub async fn post_exists_published(pool: &DbPool, post_id: &str) -> AppResult<bool> {
     let count = db_query!(pool, |p| {
         sqlx::query_scalar::<_, i64>(

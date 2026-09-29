@@ -3,7 +3,7 @@ use crate::{
     db::DbPool,
     errors::{AppError, AppResult},
     models::{comment::*, user::Role},
-    repositories::comment_repo,
+    repositories::{comment_repo, post_repo},
     validators::validate_request,
 };
 use axum::{
@@ -15,14 +15,18 @@ use std::collections::HashMap;
 pub async fn create_comment(
     State(pool): State<DbPool>,
     Extension(auth_user): Extension<AuthUser>,
-    Path(post_id): Path<String>,
+    Path(post_key): Path<String>,
     Json(req): Json<CreateCommentRequest>,
 ) -> AppResult<Json<CommentTreeNode>> {
     validate_request(&req)?;
 
-    if !comment_repo::post_exists_published(&pool, &post_id).await? {
+    let post = post_repo::find_by_id_or_slug(&pool, &post_key)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Post not found".into()))?;
+    if !post.published {
         return Err(AppError::NotFound("Post not found".into()));
     }
+    let post_id = post.id;
 
     let id = uuid::Uuid::new_v4().to_string();
     let mut path = String::new();
@@ -76,20 +80,26 @@ pub async fn create_comment(
 
 pub async fn get_comments_tree(
     State(pool): State<DbPool>,
-    Path(post_id): Path<String>,
+    Path(post_key): Path<String>,
 ) -> AppResult<Json<Vec<CommentTreeNode>>> {
-    let flat = comment_repo::list_for_post(&pool, &post_id).await?;
+    let post = post_repo::find_by_id_or_slug(&pool, &post_key)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Post not found".into()))?;
+    let flat = comment_repo::list_for_post(&pool, &post.id).await?;
     Ok(Json(build_comment_tree(flat)))
 }
 
 pub async fn update_comment(
     State(pool): State<DbPool>,
     Extension(auth_user): Extension<AuthUser>,
-    Path((post_id, comment_id)): Path<(String, String)>,
+    Path((post_key, comment_id)): Path<(String, String)>,
     Json(req): Json<UpdateCommentRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
     validate_request(&req)?;
-    let c = comment_repo::find_by_id(&pool, &comment_id, &post_id)
+    let post = post_repo::find_by_id_or_slug(&pool, &post_key)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Post not found".into()))?;
+    let c = comment_repo::find_by_id(&pool, &comment_id, &post.id)
         .await?
         .ok_or_else(|| AppError::NotFound("Comment not found".into()))?;
     if c.author_id != auth_user.id && !auth_user.role.has_permission(&Role::Moderator) {
@@ -102,9 +112,12 @@ pub async fn update_comment(
 pub async fn delete_comment(
     State(pool): State<DbPool>,
     Extension(auth_user): Extension<AuthUser>,
-    Path((post_id, comment_id)): Path<(String, String)>,
+    Path((post_key, comment_id)): Path<(String, String)>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let c = comment_repo::find_by_id(&pool, &comment_id, &post_id)
+    let post = post_repo::find_by_id_or_slug(&pool, &post_key)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Post not found".into()))?;
+    let c = comment_repo::find_by_id(&pool, &comment_id, &post.id)
         .await?
         .ok_or_else(|| AppError::NotFound("Comment not found".into()))?;
     if c.author_id != auth_user.id && !auth_user.role.has_permission(&Role::Moderator) {
@@ -118,7 +131,10 @@ pub async fn delete_comment(
     Ok(Json(serde_json::json!({"message": "Comment deleted"})))
 }
 
-fn build_comment_tree(flat: Vec<CommentFlat>) -> Vec<CommentTreeNode> {
+fn build_comment_tree(mut flat: Vec<CommentFlat>) -> Vec<CommentTreeNode> {
+    // Deterministic chronological order (DB already sorts, but enforce for children).
+    flat.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+
     let mut nodes: HashMap<String, CommentTreeNode> = HashMap::new();
     let mut root_ids: Vec<String> = Vec::new();
     let mut children_map: HashMap<String, Vec<String>> = HashMap::new();
@@ -159,13 +175,29 @@ fn build_comment_tree(flat: Vec<CommentFlat>) -> Vec<CommentTreeNode> {
         let mut node = nodes.remove(id).unwrap();
         if let Some(child_ids) = cm.get(id) {
             for cid in child_ids {
-                node.children.push(build(cid, nodes, cm));
+                if nodes.contains_key(cid) {
+                    node.children.push(build(cid, nodes, cm));
+                }
             }
         }
         node
     }
 
-    root_ids
+    // Orphans (parent missing, e.g. hard-deleted out of order) become roots
+    // instead of disappearing.
+    let mut roots: Vec<String> = root_ids
+        .into_iter()
+        .filter(|id| nodes.contains_key(id))
+        .collect();
+    let orphaned: Vec<String> = nodes
+        .keys()
+        .filter(|id| !roots.contains(id) && !children_map.values().any(|v| v.contains(id)))
+        .cloned()
+        .collect();
+    roots.extend(orphaned);
+
+    #[allow(clippy::filter_map_bool_then)]
+    roots
         .iter()
         .filter_map(|id| {
             nodes

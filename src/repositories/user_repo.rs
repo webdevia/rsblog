@@ -99,12 +99,21 @@ pub async fn count_admins(pool: &DbPool) -> AppResult<i64> {
     Ok(count)
 }
 
-pub async fn create_admin(pool: &DbPool, id: &str, password_hash: &str) -> AppResult<()> {
+pub async fn create_admin(
+    pool: &DbPool,
+    id: &str,
+    username: &str,
+    email: &str,
+    password_hash: &str,
+) -> AppResult<()> {
     db_query!(pool, |p| {
         sqlx::query(
-            "INSERT INTO users (id, username, email, password_hash, role) VALUES ($1, 'admin', 'admin@blog.com', $2, 'admin')"
+            "INSERT INTO users (id, username, email, password_hash, role) VALUES ($1, $2, $3, $4, 'admin')"
         )
-        .bind(id).bind(password_hash)
+        .bind(id)
+        .bind(username)
+        .bind(email)
+        .bind(password_hash)
         .execute(p)
         .await
         .ok();

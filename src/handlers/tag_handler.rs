@@ -28,41 +28,44 @@ pub async fn list_tags(State(pool): State<DbPool>) -> AppResult<Json<Vec<TagWith
     Ok(Json(tag_repo::list_with_counts(&pool).await?))
 }
 
-pub async fn get_tag(State(pool): State<DbPool>, Path(id): Path<String>) -> AppResult<Json<Tag>> {
-    // Try looking up by slug first
-    if let Some(tag) = tag_repo::find_by_slug(&pool, &id).await? {
-        Ok(Json(tag))
-    } else {
-        // Fallback to checking by ID
-        let tag = tag_repo::find_by_id(&pool, &id)
-            .await
-            .map_err(|_| AppError::NotFound("Tag not found".into()))?;
-        Ok(Json(tag))
-    }
+pub async fn get_tag(State(pool): State<DbPool>, Path(key): Path<String>) -> AppResult<Json<Tag>> {
+    let tag = tag_repo::find_by_id_or_slug(&pool, &key)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Tag not found".into()))?;
+    Ok(Json(tag))
 }
 
 pub async fn update_tag(
     State(pool): State<DbPool>,
     Extension(auth_user): Extension<AuthUser>,
-    Path(id): Path<String>,
+    Path(key): Path<String>,
     Json(req): Json<UpdateTagRequest>,
 ) -> AppResult<Json<Tag>> {
     require_role(&auth_user, Role::Moderator)?;
     validate_request(&req)?;
+    let existing = tag_repo::find_by_id_or_slug(&pool, &key)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Tag not found".into()))?;
     let slug = slugify(&req.name);
-    if tag_repo::update(&pool, &id, &req.name, &slug).await? == 0 {
+    if tag_repo::update(&pool, &existing.id, &req.name, &slug).await? == 0 {
         return Err(AppError::NotFound("Tag not found".into()));
     }
-    Ok(Json(tag_repo::find_by_id(&pool, &id).await?))
+    let updated = tag_repo::find_by_id(&pool, &existing.id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Tag not found".into()))?;
+    Ok(Json(updated))
 }
 
 pub async fn delete_tag(
     State(pool): State<DbPool>,
     Extension(auth_user): Extension<AuthUser>,
-    Path(id): Path<String>,
+    Path(key): Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
     require_role(&auth_user, Role::Admin)?;
-    if tag_repo::delete(&pool, &id).await? == 0 {
+    let existing = tag_repo::find_by_id_or_slug(&pool, &key)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Tag not found".into()))?;
+    if tag_repo::delete(&pool, &existing.id).await? == 0 {
         return Err(AppError::NotFound("Tag not found".into()));
     }
     Ok(Json(serde_json::json!({"message": "Tag deleted"})))

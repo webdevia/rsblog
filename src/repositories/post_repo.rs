@@ -1,5 +1,6 @@
 use crate::{db::DbPool, db_query, errors::AppResult, models::post::*};
 
+#[allow(clippy::too_many_arguments)]
 pub async fn create(
     pool: &DbPool,
     id: &str,
@@ -44,6 +45,7 @@ pub async fn find_by_id(pool: &DbPool, id: &str) -> AppResult<Option<Post>> {
     Ok(post)
 }
 
+#[allow(dead_code)]
 pub async fn find_by_slug(
     pool: &DbPool,
     slug: &str,
@@ -79,6 +81,37 @@ pub async fn slug_exists(pool: &DbPool, slug: &str) -> AppResult<bool> {
             .await?
     });
     Ok(count > 0)
+}
+
+pub async fn slug_exists_excluding(pool: &DbPool, slug: &str, exclude_id: &str) -> AppResult<bool> {
+    let count = db_query!(pool, |p| {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM posts WHERE slug = $1 AND id != $2")
+            .bind(slug)
+            .bind(exclude_id)
+            .fetch_one(p)
+            .await?
+    });
+    Ok(count > 0)
+}
+
+/// Lookup by UUID or slug (friendly URLs). Tries ID first, then slug.
+pub async fn find_by_id_or_slug(pool: &DbPool, key: &str) -> AppResult<Option<Post>> {
+    if let Some(post) = find_by_id(pool, key).await? {
+        return Ok(Some(post));
+    }
+    let post = db_query!(pool, |p| {
+        sqlx::query_as::<_, Post>(
+            "SELECT id, title, slug, content, excerpt, \
+             CAST(published AS BOOLEAN) as published, author_id, \
+             CAST(created_at AS TEXT) as created_at, \
+             CAST(updated_at AS TEXT) as updated_at \
+             FROM posts WHERE slug = $1",
+        )
+        .bind(key)
+        .fetch_optional(p)
+        .await?
+    });
+    Ok(post)
 }
 
 pub async fn update(
@@ -153,6 +186,53 @@ pub async fn get_tags(pool: &DbPool, post_id: &str) -> AppResult<Vec<TagInfo>> {
     Ok(tags)
 }
 
+/// Batch tag fetch to avoid N+1 in list endpoints.
+/// Returns map post_id -> tags.
+pub async fn get_tags_for_posts(
+    pool: &DbPool,
+    post_ids: &[String],
+) -> AppResult<std::collections::HashMap<String, Vec<TagInfo>>> {
+    use std::collections::HashMap;
+
+    #[derive(sqlx::FromRow)]
+    struct PostTagRow {
+        post_id: String,
+        id: String,
+        name: String,
+        slug: String,
+    }
+
+    if post_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let placeholders: Vec<String> = (1..=post_ids.len()).map(|i| format!("${i}")).collect();
+    let sql = format!(
+        "SELECT pt.post_id as post_id, t.id, t.name, t.slug FROM tags t \
+         JOIN post_tags pt ON t.id = pt.tag_id WHERE pt.post_id IN ({})",
+        placeholders.join(", ")
+    );
+
+    let rows = db_query!(pool, |p| {
+        // SAFETY: placeholders are generated `$N`, values are bound.
+        let mut q = sqlx::query_as::<_, PostTagRow>(sqlx::AssertSqlSafe(sql.as_str()));
+        for id in post_ids {
+            q = q.bind(id);
+        }
+        q.fetch_all(p).await?
+    });
+
+    let mut map: HashMap<String, Vec<TagInfo>> = HashMap::new();
+    for r in rows {
+        map.entry(r.post_id).or_default().push(TagInfo {
+            id: r.id,
+            name: r.name,
+            slug: r.slug,
+        });
+    }
+    Ok(map)
+}
+
 pub async fn get_author(pool: &DbPool, author_id: &str) -> AppResult<PostAuthor> {
     let author = db_query!(pool, |p| {
         sqlx::query_as::<_, PostAuthor>("SELECT id, username FROM users WHERE id = $1")
@@ -206,12 +286,17 @@ pub async fn list(
         params.push(t.to_string());
     }
     if let Some(s) = search {
-        let pat = format!("%{s}%");
+        let pat = format!("%{}%", s.to_lowercase());
         idx += 1;
         let i1 = idx;
         idx += 1;
         let i2 = idx;
-        conditions.push(format!("(p.title LIKE ${i1} OR p.content LIKE ${i2})"));
+        // Portable case-insensitive search (SQLite LIKE is ASCII-insensitive,
+        // Postgres LIKE is sensitive; LOWER() works on both and can use
+        // expression indexes. Postgres FTS index remains for future use).
+        conditions.push(format!(
+            "(LOWER(p.title) LIKE LOWER(${i1}) OR LOWER(p.content) LIKE LOWER(${i2}))"
+        ));
         params.push(pat.clone());
         params.push(pat);
     }
@@ -244,13 +329,15 @@ pub async fn list(
     );
 
     let (rows, total) = db_query!(pool, |p| {
-        let mut cq = sqlx::query_scalar::<_, i64>(&count_sql);
+        // SAFETY: `count_sql`/`data_sql` are built only from static fragments and
+        // positional `$N` placeholders; all user input goes through bound params.
+        let mut cq = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(count_sql.as_str()));
         for v in &params {
             cq = cq.bind(v);
         }
         let total = cq.fetch_one(p).await?;
 
-        let mut dq = sqlx::query_as::<_, PostRow>(&data_sql);
+        let mut dq = sqlx::query_as::<_, PostRow>(sqlx::AssertSqlSafe(data_sql.as_str()));
         for v in &params {
             dq = dq.bind(v);
         }

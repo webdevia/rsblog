@@ -1,8 +1,9 @@
 use crate::{
-    auth::jwt::verify_token,
-    config::Config,
+    auth::jwt::{verify_token, Claims},
     errors::{AppError, AppResult},
     models::user::Role,
+    repositories::user_repo,
+    routes::AppState,
 };
 use axum::{
     extract::{Request, State},
@@ -20,27 +21,48 @@ pub struct AuthUser {
 }
 
 pub async fn auth_middleware(
-    State(config): State<Config>,
+    State(state): State<AppState>,
     mut req: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    let auth_user = extract_user(&req, &config)?;
-    req.extensions_mut().insert(auth_user);
+    let claims = extract_claims(&req, &state.config.jwt_secret)?;
+    // Revalidate against DB: revokes deactivated/deleted users and picks up fresh role.
+    let user = user_repo::find_by_id(&state.pool, &claims.sub)
+        .await?
+        .ok_or(AppError::Unauthorized)?;
+    if !user.is_active {
+        return Err(AppError::Unauthorized);
+    }
+    req.extensions_mut().insert(AuthUser {
+        id: user.id,
+        username: user.username,
+        role: Role::from_str(&user.role),
+    });
     Ok(next.run(req).await)
 }
 
 #[allow(dead_code)]
 pub async fn optional_auth_middleware(
-    State(config): State<Config>,
+    State(state): State<AppState>,
     mut req: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    let user = extract_user(&req, &config).ok();
-    req.extensions_mut().insert(user);
+    let authed: Option<AuthUser> = match extract_claims(&req, &state.config.jwt_secret) {
+        Ok(claims) => match user_repo::find_by_id(&state.pool, &claims.sub).await {
+            Ok(Some(user)) if user.is_active => Some(AuthUser {
+                id: user.id.clone(),
+                username: user.username.clone(),
+                role: Role::from_str(&user.role),
+            }),
+            _ => None,
+        },
+        Err(_) => None,
+    };
+    req.extensions_mut().insert(authed);
     Ok(next.run(req).await)
 }
 
-fn extract_user(req: &Request, config: &Config) -> AppResult<AuthUser> {
+fn extract_claims(req: &Request, jwt_secret: &str) -> AppResult<Claims> {
     let header = req
         .headers()
         .get(AUTHORIZATION)
@@ -49,12 +71,7 @@ fn extract_user(req: &Request, config: &Config) -> AppResult<AuthUser> {
     let token = header
         .strip_prefix("Bearer ")
         .ok_or(AppError::Unauthorized)?;
-    let claims = verify_token(token, &config.jwt_secret)?.claims;
-    Ok(AuthUser {
-        id: claims.sub,
-        username: claims.username,
-        role: Role::from_str(&claims.role),
-    })
+    Ok(verify_token(token, jwt_secret)?.claims)
 }
 
 pub fn require_role(user: &AuthUser, required: Role) -> AppResult<()> {

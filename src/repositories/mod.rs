@@ -10,10 +10,10 @@ macro_rules! db_query {
     ($pool:expr, |$p:ident| $body:expr) => {
         match $pool {
             #[cfg(feature = "sqlite")]
-            crate::db::DbPool::Sqlite(ref $p) => $body,
+            $crate::db::DbPool::Sqlite(ref $p) => $body,
 
             #[cfg(feature = "postgres")]
-            crate::db::DbPool::Postgres(ref $p) => $body,
+            $crate::db::DbPool::Postgres(ref $p) => $body,
         }
     };
 }

@@ -28,6 +28,8 @@ pub fn create_router(state: AppState) -> Router {
     let auth_layer = middleware::from_fn_with_state(state.clone(), auth_middleware);
 
     let routes = Router::new()
+        // --- Health (Public, no auth, no rate-limit bypass) ---
+        .route("/health", get(health))
         // --- Authentication (Public) ---
         .route("/auth/register", post(auth_handler::register))
         .route("/auth/login", post(auth_handler::login))
@@ -84,5 +86,16 @@ pub fn create_router(state: AppState) -> Router {
             post(user_handler::deactivate_user.layer(auth_layer.clone())),
         );
 
-    Router::new().nest("/api/v1", routes).with_state(state)
+    // Top-level health for load balancers (outside /api/v1), plus versioned one.
+    Router::new()
+        .route("/health", get(health))
+        .nest("/api/v1", routes)
+        .with_state(state)
+}
+
+async fn health() -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({
+        "status": "ok",
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
 }

@@ -78,8 +78,11 @@ call_api() {
 # ==============================================================================
 echo -e "\n${YELLOW}--- PHASE 1: ADMIN SEED CHECK & INGESTION ---${NC}"
 
+# Admin credentials: use env when set (matches ADMIN_* in .env), fallback to dev default.
+ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:-Admin@123456}"
 # 1. Admin Login
-ADMIN_RESP=$(call_api "POST" "/auth/login" 200 '{"username": "admin", "password": "Admin@123456"}')
+ADMIN_RESP=$(call_api "POST" "/auth/login" 200 "{\"username\": \"${ADMIN_USERNAME}\", \"password\": \"${ADMIN_PASSWORD}\"}")
 ADMIN_TOKEN=$(echo "$ADMIN_RESP" | jq -r '.token')
 
 # 2. Create Tag: Rust
