@@ -122,6 +122,14 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    # The Caddyfile reads {$DOMAIN} / {$ACME_EMAIL} from the container
+    # environment at startup — without these the site block has no key
+    # and Caddy exits with "server block without any key".
+    env_file:
+      - .env
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       # Certs + ACME state MUST persist, otherwise every restart
