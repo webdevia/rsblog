@@ -88,9 +88,9 @@ async fn main() {
 fn print_build_info() {
     let backends = DatabaseBackend::available_backends().join(", ");
     tracing::info!("╔══════════════════════════════════════════════════╗");
-    tracing::info!("║  Blog API                                         ║");
-    tracing::info!("║  Version:  {:<38} ║", env!("CARGO_PKG_VERSION"));
-    tracing::info!("║  Backends: {:<38} ║", backends);
+    tracing::info!("║  Blog API                                        ║");
+    tracing::info!("║  Version:  {:<38}║", env!("CARGO_PKG_VERSION"));
+    tracing::info!("║  Backends: {:<38}║", backends);
     tracing::info!("╚══════════════════════════════════════════════════╝");
 }
 
