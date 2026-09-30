@@ -67,7 +67,7 @@ logs. See [Observability](#observability).
 | `POST /posts/{id}/comments` | `401` | published posts only (draft → `404`) | same | same |
 | `POST/PUT /tags` | `401`/`403` | `403` | ✅ | ✅ |
 | `DELETE /tags` | `401`/`403` | `403` | `403` | ✅ |
-| `/admin/*` | `401` | `403` | `403` | ✅ (not self) |
+| `/admin/*` | `401` | `403` | list/view/promote/ban on users; `403` on demote, admin-role grants, admin targets, all deletes | ✅ (not self; not last admin for delete) |
 
 ## Observability
 
@@ -243,18 +243,28 @@ Moderator → `403`. Success: `{ "message": "Tag deleted" }`.
 
 ## Admin
 
-All endpoints: admin only (`401` anon, `403` user/moderator). `deactivate`/`activate`
-and `role` reject self-targeting with `400`. Unknown ids → `404`.
-`deactivate`/`activate` are idempotent (`200` if already in that state).
+All user endpoints: moderator+ (`401` anon, `403` plain users).
+Moderators may list/view (admin accounts masked as `404`), promote
+`user→moderator`, and ban/unban `user`-role accounts only. Demotions, `admin`
+grants, anything targeting admins, and **all deletions are admin-only**.
+Self-targeting → `400`. Unknown ids → `404`. `deactivate`/`activate` are
+idempotent (`200` if already in that state).
 
 ### `GET /api/v1/admin/users`
 
-Lists all users including inactive, newest first.
+Lists all users including inactive, newest first. Moderators see everyone
+except admins.
+
+### `GET /api/v1/admin/users/{id}`
+
+Single-user view (inspect before moderating). Moderators get `404` on admin
+accounts and unknown ids.
 
 ### `PUT /api/v1/admin/users/{id}/role`
 
 Request: `{ "role": "admin|moderator|user" }` (anything else → `400`).
-Returns updated `UserResponse`.
+Moderators may only promote `user→moderator`; demotions and `admin` grants →
+`403`. Returns updated `UserResponse`.
 
 ### `POST /api/v1/admin/users/{id}/deactivate`
 
@@ -265,6 +275,27 @@ Posts/comments stay visible. Success: `{ "message": "User deactivated" }`.
 
 Unlocks the account. Non-expired pre-deactivation tokens become valid again.
 Success: `{ "message": "User activated" }`.
+
+### `DELETE /api/v1/admin/users/{id}[?mode=soft|hard]` — admin only
+
+Moderators (and plain users) → `403`. Default `mode=soft`; invalid mode →
+`400`; cannot delete yourself or the last admin → `400`.
+
+- `soft`: deactivates, erases PII (`deleted_<id8>` placeholders), and
+  re-attributes posts/comments to the system `[deleted]` ghost author.
+  Content (incl. slugs/threads) stays visible. Idempotent-ish: repeat call
+  succeeds with zero counts.
+  ```json
+  { "message": "User soft-deleted", "mode": "soft",
+    "posts_reassigned": 3, "comments_reassigned": 12 }
+  ```
+- `hard`: irreversible CASCADE purge of the user row, their posts
+  (`post_tags` links go with them) and their comments (nested children via
+  `parent_id` cascade). Frees the username/email for re-registration.
+  ```json
+  { "message": "User hard-deleted", "mode": "hard",
+    "posts_deleted": 3, "comments_deleted": 12 }
+  ```
 
 ## Examples
 
@@ -462,7 +493,14 @@ curl -s -X DELETE $BASE/tags/$TAG_ID -H "Authorization: Bearer $ADMIN" | jq .
 ```bash
 curl -s $BASE/admin/users -H "Authorization: Bearer $ADMIN" | jq '.[0]'
 # 200 -> [{ "id", "username", "email", "role", "is_active", "created_at" }] (incl. inactive)
-# 401 anon; 403 user/moderator
+# moderators: same minus admin accounts; 401 anon; 403 user
+```
+
+### `GET /admin/users/{id}`
+
+```bash
+curl -s $BASE/admin/users/$UID -H "Authorization: Bearer $ADMIN" | jq .username
+# 200 -> "intern"; moderators get 404 on admin accounts; 404 unknown
 ```
 
 ### `PUT /admin/users/{id}/role`
@@ -473,6 +511,7 @@ UID=$(curl -s -X POST $BASE/auth/register -H 'Content-Type: application/json' \
 curl -s -X PUT $BASE/admin/users/$UID/role -H "Authorization: Bearer $ADMIN" \
   -H 'Content-Type: application/json' -d '{"role":"moderator"}' | jq .role
 # 200 -> "moderator"; 400 bad role or self-target; 404 unknown
+# moderators: only user->moderator (demote/grant-admin -> 403)
 ```
 
 ### `POST /admin/users/{id}/deactivate`
@@ -491,6 +530,20 @@ curl -s -X POST $BASE/admin/users/$UID/deactivate -H "Authorization: Bearer $ADM
 curl -s -X POST $BASE/admin/users/$UID/activate -H "Authorization: Bearer $ADMIN" \
   -H 'Content-Type: application/json' -d '{}' | jq .
 # 200 -> { "message": "User activated" } (idempotent; non-expired old tokens work again)
+```
+
+### `DELETE /admin/users/{id}[?mode=soft|hard]` (admin only)
+
+```bash
+curl -s -X DELETE $BASE/admin/users/$UID -H "Authorization: Bearer $ADMIN" | jq .
+# 200 -> { "message": "User soft-deleted", "mode": "soft",
+#          "posts_reassigned": 1, "comments_reassigned": 2 }
+# content stays visible under author "[deleted]"; login now 401
+curl -s -X "DELETE $BASE/admin/users/$UID?mode=hard" -H "Authorization: Bearer $ADMIN" | jq .
+# 200 -> { "message": "User hard-deleted", "mode": "hard",
+#          "posts_deleted": 1, "comments_deleted": 2 }
+# posts/comments gone; email reusable; repeat -> 404
+# moderators/users -> 403; self/last-admin/bad-mode -> 400
 ```
 
 ### End-to-end publishing flow (all roles)

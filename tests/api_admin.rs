@@ -6,17 +6,27 @@ use axum::http::StatusCode;
 use common::{make_admin, new_app, register_user, uid, TestClient};
 
 #[tokio::test]
-async fn admin_user_listing_is_admin_only() {
+async fn admin_user_listing_rbac_and_admin_masking() {
     let mut c = TestClient::new(new_app().await);
     let (admin_token, _) = make_admin(&mut c, &format!("root_{}", uid())).await;
     let (user_token, _, username) = register_user(&mut c, &format!("user_{}", uid())).await;
+    let (mod_token, mod_id, mod_name) = register_user(&mut c, &format!("mod_{}", uid())).await;
+    let (status, _) = c
+        .put(
+            &format!("/api/v1/admin/users/{mod_id}/role"),
+            Some(&admin_token),
+            serde_json::json!({"role": "moderator"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
 
     let (status, _) = c.get("/api/v1/admin/users", None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     let (status, _) = c.get("/api/v1/admin/users", Some(&user_token)).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
-    let (status, body) = c.get("/api/v1/admin/users", Some(&admin_token)).await;
+    // Moderators can list, but admin accounts are masked from them.
+    let (status, body) = c.get("/api/v1/admin/users", Some(&mod_token)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let names: Vec<&str> = body
         .as_array()
@@ -25,6 +35,19 @@ async fn admin_user_listing_is_admin_only() {
         .filter_map(|u| u["username"].as_str())
         .collect();
     assert!(names.contains(&username.as_str()));
+    assert!(names.contains(&mod_name.as_str()));
+    assert!(!names.iter().any(|n| n.starts_with("root_")), "{names:?}");
+
+    // Admins see everyone.
+    let (status, body) = c.get("/api/v1/admin/users", Some(&admin_token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.as_array().unwrap().len() >= 3);
+
+    // Single view: mods get 404 on admins, 200 on users.
+    let (status, _) = c
+        .get("/api/v1/admin/users/no-such-id", Some(&mod_token))
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -114,7 +137,9 @@ async fn deactivation_locks_account_and_cannot_target_self() {
 async fn activate_deactivate_rbac_and_404() {
     let mut c = TestClient::new(new_app().await);
     let (admin_token, admin_id) = make_admin(&mut c, &format!("root_{}", uid())).await;
-    let (user_token, user_id, _) = register_user(&mut c, &format!("user_{}", uid())).await;
+    let (_, user_id, _) = register_user(&mut c, &format!("user_{}", uid())).await;
+    // Bystander token for plain-user RBAC assertions (never banned).
+    let (bystander_token, _, _) = register_user(&mut c, &format!("bystander_{}", uid())).await;
     let (mod_token, mod_id, _) = register_user(&mut c, &format!("mod_{}", uid())).await;
     let (status, _) = c
         .put(
@@ -125,14 +150,45 @@ async fn activate_deactivate_rbac_and_404() {
         .await;
     assert_eq!(status, StatusCode::OK);
 
+    let (_, mod2_id, _) = register_user(&mut c, &format!("mod2_{}", uid())).await;
+    let (status, _) = c
+        .put(
+            &format!("/api/v1/admin/users/{mod2_id}/role"),
+            Some(&admin_token),
+            serde_json::json!({"role": "moderator"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
     for endpoint in ["deactivate", "activate"] {
         let uri = format!("/api/v1/admin/users/{user_id}/{endpoint}");
         let (status, _) = c.post(&uri, None, serde_json::json!({})).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{endpoint} anon");
-        let (status, _) = c.post(&uri, Some(&user_token), serde_json::json!({})).await;
+        let (status, _) = c
+            .post(&uri, Some(&bystander_token), serde_json::json!({}))
+            .await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{endpoint} user");
+        // Moderators CAN ban/unban plain users...
         let (status, _) = c.post(&uri, Some(&mod_token), serde_json::json!({})).await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{endpoint} mod");
+        assert_eq!(status, StatusCode::OK, "{endpoint} mod on user");
+        // ...but not fellow moderators...
+        let mod_uri = format!("/api/v1/admin/users/{mod2_id}/{endpoint}");
+        let (status, _) = c
+            .post(&mod_uri, Some(&mod_token), serde_json::json!({}))
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{endpoint} mod on mod");
+        // ...nor themselves...
+        let self_uri = format!("/api/v1/admin/users/{mod_id}/{endpoint}");
+        let (status, _) = c
+            .post(&self_uri, Some(&mod_token), serde_json::json!({}))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{endpoint} mod on self");
+        // ...and admin accounts are masked from them entirely.
+        let admin_uri = format!("/api/v1/admin/users/{admin_id}/{endpoint}");
+        let (status, _) = c
+            .post(&admin_uri, Some(&mod_token), serde_json::json!({}))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{endpoint} mod on admin");
         let (status, _) = c
             .post(
                 &format!("/api/v1/admin/users/no-such-id/{endpoint}"),

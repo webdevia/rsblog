@@ -97,10 +97,15 @@ pub fn create_router(state: AppState) -> Router {
                 .put(tag_handler::update_tag.layer(auth_layer.clone()))
                 .delete(tag_handler::delete_tag.layer(auth_layer.clone())),
         )
-        // --- Admin Console (Authenticated / Admin Only) ---
+        // --- Admin Console (Authenticated / Moderator+) ---
         .route(
             "/admin/users",
             get(user_handler::list_users.layer(auth_layer.clone())),
+        )
+        .route(
+            "/admin/users/{id}",
+            get(user_handler::get_user.layer(auth_layer.clone()))
+                .delete(user_handler::delete_user.layer(auth_layer.clone())),
         )
         .route(
             "/admin/users/{id}/role",

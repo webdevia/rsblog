@@ -10,7 +10,7 @@ A RESTful blog API written in Rust with [Axum](https://github.com/tokio-rs/axum)
 - **Tags**: CRUD with post counts; looked up by id or slug
 - **Comments**: nested tree (materialized path, max depth 10), soft-delete preserves children (`[deleted]`), hard-delete removes leaves; draft comment trees mirror post visibility; comments can only be created on published posts
 - **Moderation**: moderators/admins can edit/delete/publish any post or comment **except** moderators cannot touch admin-owned content (`403`)
-- **Admin**: list users, change roles, deactivate/activate accounts (idempotent, `404` on unknown id, cannot self-target)
+- **Admin**: list/view users, promote/ban (moderators: users only, no deletes/demotes), deactivate/activate, soft-delete (ghost attribution) / hard-delete (purge) by admins
 - **Ops**: health endpoints, graceful shutdown, per-IP rate limiting (1 req/s, burst 60), configurable CORS, 10 MB body limit, 30 s request timeout
 - **Observability**: one `INFO` access line per request, `x-request-id` on every response, `LOG_FORMAT=text|json`, slow-request warnings (see below)
 - **Hardening (no proxy needed)**: OWASP security headers on every response, CORS allowlist via `CORS_ORIGINS` (TLS termination itself stays out of the app — use an edge proxy for HTTPS)
@@ -91,12 +91,12 @@ examples: see **[docs/API.md](docs/API.md)**.
 | Level       | Location | How | Count |
 | ----------- | -------- | --- | ----- |
 | Unit        | `#[cfg(test)]` in `src/` | `cargo test --lib` | 32 |
-| Integration | `tests/api_*.rs` + `tests/common/` | `cargo test --test api_auth ...` | 47 |
+| Integration | `tests/api_*.rs` + `tests/common/` | `cargo test --test api_auth ...` | 53 |
 | E2E         | `tests/e2e_lifecycle.rs` | live server on ephemeral port via `reqwest` | 1 |
 | Shell       | `test_api.sh` | needs running server + `jq` | — |
 
 ```bash
-cargo test                          # all 80 tests (isolated temp SQLite DBs)
+cargo test                          # all 86 tests (isolated temp SQLite DBs)
 cargo test --features all-databases --lib
 cargo clippy --all-targets
 cargo fmt --all -- --check

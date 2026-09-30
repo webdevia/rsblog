@@ -112,6 +112,95 @@ pub async fn count_admins(pool: &DbPool) -> AppResult<i64> {
     Ok(count)
 }
 
+/// System ghost author for soft-deleted users' content.
+pub const GHOST_USER_ID: &str = "00000000-0000-0000-0000-000000000000";
+
+/// Idempotent ghost-user seeding (inactive, unusable credentials).
+pub async fn ensure_ghost_user(pool: &DbPool) -> AppResult<()> {
+    db_query!(pool, |p| {
+        sqlx::query(
+            "INSERT INTO users (id, username, email, password_hash, role, is_active) \
+             VALUES ($1, '[deleted]', 'deleted@deleted.local', 'deleted', 'user', FALSE) \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(GHOST_USER_ID)
+        .execute(p)
+        .await?;
+    });
+    Ok(())
+}
+
+/// Soft delete: deactivate + erase PII (username/email unlinked, password
+/// unusable). Content is re-attributed separately by the caller.
+pub async fn anonymize(pool: &DbPool, id: &str, suffix: &str) -> AppResult<u64> {
+    let rows = db_query!(pool, |p| {
+        sqlx::query(
+            "UPDATE users SET is_active = FALSE, username = $1, email = $2, \
+             password_hash = 'deleted', updated_at = CURRENT_TIMESTAMP WHERE id = $3",
+        )
+        .bind(format!("deleted_{suffix}"))
+        .bind(format!("deleted_{suffix}@deleted.local"))
+        .bind(id)
+        .execute(p)
+        .await?
+        .rows_affected()
+    });
+    Ok(rows)
+}
+
+/// Re-attribute a deleted user's posts/comments to the ghost author.
+/// Returns `(posts, comments)` counts.
+pub async fn reassign_content(pool: &DbPool, from_id: &str) -> AppResult<(u64, u64)> {
+    let (posts, comments) = db_query!(pool, |p| {
+        let posts = sqlx::query("UPDATE posts SET author_id = $1 WHERE author_id = $2")
+            .bind(GHOST_USER_ID)
+            .bind(from_id)
+            .execute(p)
+            .await?
+            .rows_affected();
+        let comments = sqlx::query("UPDATE comments SET author_id = $1 WHERE author_id = $2")
+            .bind(GHOST_USER_ID)
+            .bind(from_id)
+            .execute(p)
+            .await?
+            .rows_affected();
+        (posts, comments)
+    });
+    Ok((posts, comments))
+}
+
+pub async fn count_posts_by_author(pool: &DbPool, author_id: &str) -> AppResult<i64> {
+    let count = db_query!(pool, |p| {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM posts WHERE author_id = $1")
+            .bind(author_id)
+            .fetch_one(p)
+            .await?
+    });
+    Ok(count)
+}
+
+pub async fn count_comments_by_author(pool: &DbPool, author_id: &str) -> AppResult<i64> {
+    let count = db_query!(pool, |p| {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM comments WHERE author_id = $1")
+            .bind(author_id)
+            .fetch_one(p)
+            .await?
+    });
+    Ok(count)
+}
+
+/// Hard delete: removes the row; posts/comments/post_tags cascade via FK.
+pub async fn hard_delete(pool: &DbPool, id: &str) -> AppResult<u64> {
+    let rows = db_query!(pool, |p| {
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(id)
+            .execute(p)
+            .await?
+            .rows_affected()
+    });
+    Ok(rows)
+}
+
 pub async fn create_admin(
     pool: &DbPool,
     id: &str,
