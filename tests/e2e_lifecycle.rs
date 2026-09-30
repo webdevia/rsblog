@@ -378,6 +378,17 @@ async fn full_system_lifecycle_over_http() {
         log_format: "text".into(),
         log_include_query: false,
         slow_request_ms: 0,
+        // Anti-spam effectively off so the lifecycle is unaffected.
+        rate_limit_rps: 1000,
+        rate_limit_burst: 1000,
+        auth_rate_limit_rps: 1000,
+        auth_rate_limit_burst: 1000,
+        comment_rate_per_min: 1000,
+        post_rate_per_hour: 1000,
+        trusted_account_days: 30,
+        trusted_published_count: 5,
+        duplicate_window_min: 0,
+        max_links_new_user: 1000,
     };
     let pool = DbPool::init(&config).await;
 
@@ -397,6 +408,7 @@ async fn full_system_lifecycle_over_http() {
     let app = create_router(AppState {
         pool,
         config: config.clone(),
+        spam: blog_api::spam::SpamState::default(),
     })
     .layer(TraceLayer::new_for_http())
     .layer(

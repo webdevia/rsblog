@@ -45,11 +45,24 @@ pub(crate) fn client_ip(request: &Request, addr: &std::net::SocketAddr) -> IpAdd
 
 pub async fn rate_limit_middleware(
     State(state): State<RateLimiterState>,
-    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
     request: Request,
     next: Next,
 ) -> Response {
-    let ip = client_ip(&request, &addr);
+    // `ConnectInfo` is present under a real server; absent in unit/oneshot
+    // tests, where we fall back to the proxy header or an unspecified address
+    // (fail open — buckets are per-IP, and tests use generous limits).
+    let ip = match request
+        .extensions()
+        .get::<ConnectInfo<std::net::SocketAddr>>()
+    {
+        Some(connect) => client_ip(&request, &connect.0),
+        None => request
+            .headers()
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
+    };
 
     if state.limiter.check_key(&ip).is_ok() {
         next.run(request).await
@@ -61,7 +74,11 @@ pub async fn rate_limit_middleware(
                 "message": "Too many requests. Please try again later."
             }
         });
-        (status, Json(body)).into_response()
+        let mut res = (status, Json(body)).into_response();
+        if let Ok(v) = "60".parse() {
+            res.headers_mut().insert("retry-after", v);
+        }
+        res
     }
 }
 

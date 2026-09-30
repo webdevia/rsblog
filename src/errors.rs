@@ -28,6 +28,9 @@ pub enum AppError {
     #[error("Validation error: {0}")]
     Validation(String),
 
+    #[error("Too many requests. Please try again later.")]
+    TooManyRequests,
+
     #[error("Internal server error")]
     Internal(#[from] anyhow::Error),
 
@@ -89,13 +92,21 @@ impl IntoResponse for AppError {
                 }
             }
             AppError::Jwt(_) => (StatusCode::UNAUTHORIZED, "Invalid token".to_string()),
+            AppError::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, self.to_string()),
         };
 
-        (
+        let mut res = (
             status,
             Json(json!({ "error": { "status": status.as_u16(), "message": message } })),
         )
-            .into_response()
+            .into_response();
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            // Static hint; per-endpoint buckets refill within seconds-to-minutes.
+            if let Ok(v) = "60".parse() {
+                res.headers_mut().insert("retry-after", v);
+            }
+        }
+        res
     }
 }
 
@@ -128,6 +139,10 @@ mod tests {
         assert_eq!(
             status_of(AppError::Validation("bad field".into())),
             StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            status_of(AppError::TooManyRequests),
+            StatusCode::TOO_MANY_REQUESTS
         );
     }
 

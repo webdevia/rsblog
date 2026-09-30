@@ -17,4 +17,5 @@ pub mod rate_limiter;
 pub mod repositories;
 pub mod routes;
 pub mod security;
+pub mod spam;
 pub mod validators;

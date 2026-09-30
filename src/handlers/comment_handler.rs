@@ -5,6 +5,7 @@ use crate::{
     errors::{AppError, AppResult},
     models::{comment::*, user::Role},
     repositories::{comment_repo, post_repo, user_repo},
+    spam::SpamState,
     validators::validate_request,
 };
 use axum::{
@@ -16,11 +17,14 @@ use std::collections::HashMap;
 
 pub async fn create_comment(
     State(pool): State<DbPool>,
+    State(config): State<Config>,
+    State(spam): State<SpamState>,
     Extension(auth_user): Extension<AuthUser>,
     Path(post_key): Path<String>,
     Json(req): Json<CreateCommentRequest>,
 ) -> AppResult<Json<CommentTreeNode>> {
     validate_request(&req)?;
+    crate::spam::check_comment_write(&pool, &spam, &config, &auth_user, &req.content).await?;
 
     let post = post_repo::find_by_id_or_slug(&pool, &post_key)
         .await?

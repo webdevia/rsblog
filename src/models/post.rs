@@ -80,8 +80,9 @@ pub struct PostRow {
 pub struct CreatePostRequest {
     #[validate(length(min = 1, max = 200))]
     pub title: String,
-    #[validate(length(min = 1))]
+    #[validate(length(min = 1, max = 100_000))]
     pub content: String,
+    #[validate(length(max = 1_000))]
     pub excerpt: Option<String>,
     #[serde(default)]
     pub published: bool,
@@ -94,7 +95,9 @@ pub struct CreatePostRequest {
 pub struct UpdatePostRequest {
     #[validate(length(min = 1, max = 200))]
     pub title: Option<String>,
+    #[validate(length(min = 1, max = 100_000))]
     pub content: Option<String>,
+    #[validate(length(max = 1_000))]
     pub excerpt: Option<String>,
     pub tag_ids: Option<Vec<String>>,
 }

@@ -9,13 +9,16 @@ use crate::{
     config::Config,
     db::DbPool,
     handlers::*,
+    rate_limiter::RateLimiterState,
     security::{cors_layer, security_headers_middleware},
+    spam::SpamState,
 };
 
 #[derive(Clone)]
 pub struct AppState {
     pub pool: DbPool,
     pub config: Config,
+    pub spam: SpamState,
 }
 
 impl axum::extract::FromRef<AppState> for DbPool {
@@ -27,6 +30,12 @@ impl axum::extract::FromRef<AppState> for DbPool {
 impl axum::extract::FromRef<AppState> for Config {
     fn from_ref(s: &AppState) -> Self {
         s.config.clone()
+    }
+}
+
+impl axum::extract::FromRef<AppState> for SpamState {
+    fn from_ref(s: &AppState) -> Self {
+        s.spam.clone()
     }
 }
 
@@ -44,12 +53,23 @@ pub fn create_router(state: AppState) -> Router {
     let cors = cors_layer(&state.config.cors_origins);
     let hardening = middleware::from_fn(security_headers_middleware);
 
+    // Tight bucket for auth endpoints: slows mass-registration and
+    // credential-stuffing per IP without affecting normal traffic.
+    let auth_limit = RateLimiterState::new(
+        state.config.auth_rate_limit_rps,
+        state.config.auth_rate_limit_burst,
+    );
+    let auth_limit_layer =
+        middleware::from_fn_with_state(auth_limit, crate::rate_limiter::rate_limit_middleware);
+    let auth_routes = Router::new()
+        .route("/auth/register", post(auth_handler::register))
+        .route("/auth/login", post(auth_handler::login))
+        .route_layer(auth_limit_layer);
+
     let routes = Router::new()
         // --- Health (Public, no auth, no rate-limit bypass) ---
         .route("/health", get(health))
-        // --- Authentication (Public) ---
-        .route("/auth/register", post(auth_handler::register))
-        .route("/auth/login", post(auth_handler::login))
+        .merge(auth_routes)
         // --- Profile (Authenticated) ---
         .route(
             "/users/me",

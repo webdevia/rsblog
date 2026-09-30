@@ -48,6 +48,17 @@ fn test_config(db_path: &str) -> Config {
         log_format: "text".into(),
         log_include_query: false,
         slow_request_ms: 0,
+        // Anti-spam effectively off by default so existing tests are unaffected.
+        rate_limit_rps: 1000,
+        rate_limit_burst: 1000,
+        auth_rate_limit_rps: 1000,
+        auth_rate_limit_burst: 1000,
+        comment_rate_per_min: 1000,
+        post_rate_per_hour: 1000,
+        trusted_account_days: 30,
+        trusted_published_count: 5,
+        duplicate_window_min: 0,
+        max_links_new_user: 1000,
     }
 }
 
@@ -62,15 +73,25 @@ pub struct TestApp {
 /// Build an isolated app instance backed by a fresh temp SQLite database.
 /// Uses the same observability wrap as production (`x-request-id` + access log).
 pub async fn new_app() -> TestApp {
-    let db_path =
-        std::env::temp_dir().join(format!("rsblog-itest-{}-{}.db", std::process::id(), uid()));
-    let db_path = db_path.to_string_lossy().into_owned();
-    let config = test_config(&db_path);
+    let db_path = fresh_db_path();
+    new_app_with_config(test_config(&db_path), db_path).await
+}
+
+fn fresh_db_path() -> String {
+    std::env::temp_dir()
+        .join(format!("rsblog-itest-{}-{}.db", std::process::id(), uid()))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Shared builder over an explicit config.
+async fn new_app_with_config(config: Config, db_path: String) -> TestApp {
     let pool = DbPool::init(&config).await;
     let router = wrap_router(
         create_router(AppState {
             pool: pool.clone(),
             config: config.clone(),
+            spam: blog_api::spam::SpamState::default(),
         }),
         AccessLogConfig {
             include_query: false,
@@ -83,6 +104,20 @@ pub async fn new_app() -> TestApp {
         config,
         _db_path: db_path,
     }
+}
+
+/// Strict anti-spam app for `api_antispam` tests: low throttles, duplicates
+/// and link caps enabled, tight auth bucket.
+pub async fn new_strict_app() -> TestApp {
+    let db_path = fresh_db_path();
+    let mut config = test_config(&db_path);
+    config.comment_rate_per_min = 3;
+    config.post_rate_per_hour = 3;
+    config.duplicate_window_min = 60;
+    config.max_links_new_user = 1;
+    config.auth_rate_limit_rps = 1;
+    config.auth_rate_limit_burst = 5;
+    new_app_with_config(config, db_path).await
 }
 
 pub struct TestClient {
@@ -105,6 +140,19 @@ impl TestClient {
         token: Option<&str>,
         body: Option<Value>,
     ) -> (StatusCode, Value) {
+        let (status, _, json) = self.request_with_headers(method, uri, token, body).await;
+        (status, json)
+    }
+
+    /// Same as `request` but also returns the response headers (for
+    /// asserting `retry-after`, `x-request-id`, ...).
+    pub async fn request_with_headers(
+        &mut self,
+        method: &str,
+        uri: &str,
+        token: Option<&str>,
+        body: Option<Value>,
+    ) -> (StatusCode, axum::http::HeaderMap, Value) {
         let method: Method = method.parse().unwrap();
         let mut builder = Request::builder().method(method).uri(uri);
         if let Some(t) = token {
@@ -126,6 +174,7 @@ impl TestClient {
             .await
             .expect("router should handle request");
         let status = resp.status();
+        let headers = resp.headers().clone();
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
@@ -134,7 +183,7 @@ impl TestClient {
         } else {
             serde_json::from_slice(&bytes).unwrap_or(Value::Null)
         };
-        (status, json)
+        (status, headers, json)
     }
 
     pub async fn get(&mut self, uri: &str, token: Option<&str>) -> (StatusCode, Value) {

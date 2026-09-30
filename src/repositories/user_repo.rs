@@ -220,6 +220,18 @@ pub async fn count_posts_by_author(pool: &DbPool, author_id: &str) -> AppResult<
     Ok(count)
 }
 
+pub async fn count_published_by_author(pool: &DbPool, author_id: &str) -> AppResult<i64> {
+    let count = db_query!(pool, |p| {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM posts WHERE author_id = $1 AND published = TRUE",
+        )
+        .bind(author_id)
+        .fetch_one(p)
+        .await?
+    });
+    Ok(count)
+}
+
 pub async fn count_comments_by_author(pool: &DbPool, author_id: &str) -> AppResult<i64> {
     let count = db_query!(pool, |p| {
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM comments WHERE author_id = $1")

@@ -39,6 +39,7 @@ logs. See [Observability](#observability).
 - [Conventions](#conventions)
 - [RBAC matrix](#rbac-matrix)
 - [Observability](#observability)
+- [Anti-spam](#anti-spam)
 - [Health](#health)
 - [Auth](#auth)
 - [Posts](#posts)
@@ -54,9 +55,10 @@ logs. See [Observability](#observability).
   except where noted.
 - `?published=` query param on `GET /posts` is accepted for compatibility but **ignored**:
   visibility is derived from the viewer.
-- Validation limits: post title 1–200 chars, post content ≥ 1 char, comment content
-  1–5000 chars, tag name 1–50 chars, username 3–30 chars, email must be valid,
-  password 8–128 chars. Comment nesting max depth 10.
+- Validation limits: post title 1–200 chars, post content 1–100,000 chars,
+  excerpt ≤ 1,000 chars, comment content 1–5000 chars, tag name 1–50 chars,
+  username 3–30 chars, email must be valid, password 8–128 chars.
+  Comment nesting max depth 10.
 - Comment delete: leaf → hard-delete (row removed); parent → soft-delete
   (`content: "[deleted]"`, `is_deleted: true`, children preserved).
 
@@ -100,6 +102,33 @@ curl -sI localhost:3000/api/v1/posts | grep -i x-request-id
 # x-request-id: 550e8400-e29b-41d4-a716-446655440000
 curl -s localhost:3000/api/v1/posts -H 'x-request-id: my-id-1' -D - -o /dev/null | grep -i x-request-id
 # x-request-id: my-id-1
+```
+
+## Anti-spam
+
+Two layers: per-IP rate buckets stop floods, per-user content checks stop spam
+accounts. All `429`s carry a `Retry-After: 60` header and the standard error body.
+
+| Layer | Scope | Defaults | Knobs |
+|---|---|---|---|
+| Global bucket | per IP, all traffic | 1 rps, burst 60 | `RATE_LIMIT_RPS`, `RATE_LIMIT_BURST` |
+| Auth bucket | per IP, `/auth/*` | 1 rps, burst 5 | `AUTH_RATE_RPS`, `AUTH_RATE_BURST` |
+| Comment throttle | per user | 5/min | `COMMENT_RATE_PER_MIN` (`0` off) |
+| Post throttle | per user | 10/hour | `POST_RATE_PER_HOUR` (`0` off) |
+| Duplicates | per user, posts+comments | 60 min window | `DUPLICATE_WINDOW_MIN` (`0` off) → `409` |
+| Link cap | untrusted users | 3 links/post-or-comment | `MAX_LINKS_NEW_USER` (`0` off) → `422` |
+
+Trusted users skip write throttles and link caps (duplicates still apply):
+moderators/admins, accounts older than `TRUSTED_ACCOUNT_DAYS` (default 30), or
+authors with ≥ `TRUSTED_PUBLISHED_COUNT` published posts (default 5).
+Throttle state is in-memory sliding windows (no migration); restarts reset
+counters toward leniency. Checks run after validation and auth, ordered
+link-cap → duplicate → rate, so rejected requests don't burn quota.
+
+```bash
+curl -s -X POST $BASE/posts/$POST_ID/comments -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"content":"buy now https://x.example"}' -D - | grep -i retry-after
+# HTTP/1.1 429 Too Many Requests + retry-after: 60 (when throttled)
 ```
 
 ## Health

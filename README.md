@@ -11,7 +11,7 @@ A RESTful blog API written in Rust with [Axum](https://github.com/tokio-rs/axum)
 - **Comments**: nested tree (materialized path, max depth 10), soft-delete preserves children (`[deleted]`), hard-delete removes leaves; draft comment trees mirror post visibility; comments can only be created on published posts
 - **Moderation**: moderators/admins can edit/delete/publish any post or comment **except** moderators cannot touch admin-owned content (`403`)
 - **Admin**: list/view users, promote/ban (moderators: users only, no deletes/demotes), deactivate/activate, soft-delete (ghost attribution) / hard-delete (purge) by admins
-- **Ops**: health endpoints, graceful shutdown, per-IP rate limiting (1 req/s, burst 60), configurable CORS, 10 MB body limit, 30 s request timeout
+- **Ops**: health endpoints, graceful shutdown, per-IP rate limiting (1 req/s, burst 60, tighter `/auth/*` bucket), per-user write throttles with trusted bypass, duplicate/link spam guards, configurable CORS, 10 MB body limit, 30 s request timeout
 - **Observability**: one `INFO` access line per request, `x-request-id` on every response, `LOG_FORMAT=text|json`, slow-request warnings (see below)
 - **Hardening (no proxy needed)**: OWASP security headers on every response, CORS allowlist via `CORS_ORIGINS` (TLS termination itself stays out of the app — use an edge proxy for HTTPS)
 
@@ -69,6 +69,13 @@ Backend resolution: `DATABASE_BACKEND` env var → URL scheme auto-detect → bu
 | `LOG_FORMAT`           | no       | `text`               | `text` (dev) or `json` (prod via compose) |
 | `LOG_INCLUDE_QUERY`    | no       | `false`              | `true` appends `?query` to access-log paths |
 | `SLOW_REQUEST_MS`      | no       | `1000`               | `warn!` threshold for slow requests (`0` disables) |
+| `RATE_LIMIT_RPS` / `RATE_LIMIT_BURST` | no | `1` / `60`        | per-IP global bucket (sustained rps + burst) |
+| `AUTH_RATE_RPS` / `AUTH_RATE_BURST` | no | `1` / `5`          | per-IP bucket for `/auth/*` |
+| `COMMENT_RATE_PER_MIN` | no     | `5`                  | max comments per user per minute (`0` disables) |
+| `POST_RATE_PER_HOUR` | no       | `10`                 | max posts per user per hour (`0` disables) |
+| `TRUSTED_ACCOUNT_DAYS` / `TRUSTED_PUBLISHED_COUNT` | no | `30` / `5` | skip write throttles at age/posts threshold |
+| `DUPLICATE_WINDOW_MIN` | no     | `60`                 | reject identical user content window, min (`0` disables) |
+| `MAX_LINKS_NEW_USER` | no       | `3`                  | max links per post/comment for untrusted users (`0` disables) |
 
 Never commit `.env` (already git-ignored; only `.env.example` is tracked).
 
@@ -90,13 +97,13 @@ examples: see **[docs/API.md](docs/API.md)**.
 
 | Level       | Location | How | Count |
 | ----------- | -------- | --- | ----- |
-| Unit        | `#[cfg(test)]` in `src/` | `cargo test --lib` | 32 |
-| Integration | `tests/api_*.rs` + `tests/common/` | `cargo test --test api_auth ...` | 54 |
+| Unit        | `#[cfg(test)]` in `src/` | `cargo test --lib` | 37 |
+| Integration | `tests/api_*.rs` + `tests/common/` | `cargo test --test api_auth ...` | 62 |
 | E2E         | `tests/e2e_lifecycle.rs` | live server on ephemeral port via `reqwest` | 1 |
 | Shell       | `test_api.sh` | needs running server + `jq` | — |
 
 ```bash
-cargo test                          # all 87 tests (isolated temp SQLite DBs)
+cargo test                          # all 100 tests (isolated temp SQLite DBs)
 cargo test --features all-databases --lib
 cargo clippy --all-targets
 cargo fmt --all -- --check

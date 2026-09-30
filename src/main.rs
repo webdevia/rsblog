@@ -16,6 +16,7 @@ use blog_api::{
     rate_limiter::{rate_limit_middleware, RateLimiterState},
     repositories::user_repo,
     routes::{create_router, AppState},
+    spam::SpamState,
 };
 
 #[tokio::main]
@@ -33,10 +34,11 @@ async fn main() {
     let state = AppState {
         pool,
         config: config.clone(),
+        spam: SpamState::default(),
     };
 
-    // Rate limiting: 60 requests per minute (avg 1 req/sec) with burst capacity of 60
-    let rate_limiter_state = RateLimiterState::new(1, 60);
+    // Rate limiting from env (defaults: 1 req/sec avg, burst 60 per IP).
+    let rate_limiter_state = RateLimiterState::new(config.rate_limit_rps, config.rate_limit_burst);
 
     // NOTE: layers apply inside-out (last `.layer()` is outermost). The
     // observability wrap is applied last so the access log + `x-request-id`

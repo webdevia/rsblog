@@ -5,6 +5,7 @@ use crate::{
     errors::{AppError, AppResult},
     models::{post::*, user::Role},
     repositories::{post_repo, user_repo},
+    spam::SpamState,
     validators::{slugify, validate_request},
 };
 use axum::{
@@ -15,10 +16,22 @@ use axum::{
 
 pub async fn create_post(
     State(pool): State<DbPool>,
+    State(config): State<Config>,
+    State(spam): State<SpamState>,
     Extension(auth_user): Extension<AuthUser>,
     Json(req): Json<CreatePostRequest>,
 ) -> AppResult<Json<PostResponse>> {
     validate_request(&req)?;
+    crate::spam::check_post_write(
+        &pool,
+        &spam,
+        &config,
+        &auth_user,
+        &req.title,
+        &req.content,
+        req.excerpt.as_deref(),
+    )
+    .await?;
     let id = uuid::Uuid::new_v4().to_string();
     let slug = slugify(&req.title);
     let final_slug = if post_repo::slug_exists(&pool, &slug).await? {
