@@ -28,7 +28,9 @@ async fn admin_user_listing_rbac_and_admin_masking() {
     // Moderators can list, but admin accounts are masked from them.
     let (status, body) = c.get("/api/v1/admin/users", Some(&mod_token)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    let names: Vec<&str> = body
+    assert_eq!(body["page"], 1);
+    assert_eq!(body["per_page"], 20);
+    let names: Vec<&str> = body["users"]
         .as_array()
         .unwrap()
         .iter()
@@ -37,11 +39,56 @@ async fn admin_user_listing_rbac_and_admin_masking() {
     assert!(names.contains(&username.as_str()));
     assert!(names.contains(&mod_name.as_str()));
     assert!(!names.iter().any(|n| n.starts_with("root_")), "{names:?}");
+    assert_eq!(
+        body["total"].as_i64().unwrap(),
+        body["users"].as_array().unwrap().len() as i64
+    );
 
     // Admins see everyone.
     let (status, body) = c.get("/api/v1/admin/users", Some(&admin_token)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(body.as_array().unwrap().len() >= 3);
+    assert!(body["total"].as_i64().unwrap() >= 3);
+    assert!(body["users"].as_array().unwrap().len() >= 3);
+
+    // Pagination.
+    let (status, body) = c
+        .get("/api/v1/admin/users?per_page=1&page=2", Some(&admin_token))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["users"].as_array().unwrap().len(), 1);
+    assert_eq!(body["page"], 2);
+    assert_eq!(body["per_page"], 1);
+
+    // Order asc vs desc reverses; invalid order is 400.
+    let (status, desc) = c
+        .get("/api/v1/admin/users?per_page=100", Some(&admin_token))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, asc) = c
+        .get(
+            "/api/v1/admin/users?per_page=100&order=asc",
+            Some(&admin_token),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{asc}");
+    let desc_ids: Vec<&str> = desc["users"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|u| u["id"].as_str())
+        .collect();
+    let mut asc_ids: Vec<&str> = asc["users"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|u| u["id"].as_str())
+        .collect();
+    asc_ids.reverse();
+    assert_eq!(desc_ids, asc_ids);
+    let (status, _) = c
+        .get("/api/v1/admin/users?order=sideways", Some(&admin_token))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 
     // Single view: mods get 404 on admins, 200 on users.
     let (status, _) = c

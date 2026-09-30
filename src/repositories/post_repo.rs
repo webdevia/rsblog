@@ -288,6 +288,7 @@ pub async fn list(
     search: Option<&str>,
     page: i64,
     per_page: i64,
+    ascending: bool,
 ) -> AppResult<(Vec<PostRow>, i64)> {
     let offset = (page - 1) * per_page;
 
@@ -351,6 +352,10 @@ pub async fn list(
     idx += 1;
     let offset_idx = idx;
 
+    // Deterministic order: `id` tiebreaker guards against equal
+    // `created_at` values (SQLite timestamps have 1s resolution), so rows
+    // can't duplicate or vanish across pages.
+    let direction = if ascending { "ASC" } else { "DESC" };
     let data_sql = format!(
         "SELECT p.id, p.title, p.slug, p.excerpt, \
          CAST(p.published AS BOOLEAN) as published, \
@@ -359,7 +364,7 @@ pub async fn list(
          (SELECT COUNT(*) FROM comments c WHERE c.post_id = p.id AND c.is_deleted = FALSE) as comment_count \
          FROM posts p JOIN users u ON p.author_id = u.id \
          WHERE {where_clause} \
-         ORDER BY p.created_at DESC \
+         ORDER BY p.created_at {direction}, p.id {direction} \
          LIMIT ${limit_idx} OFFSET ${offset_idx}"
     );
 

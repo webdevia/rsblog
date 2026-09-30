@@ -22,8 +22,13 @@ with `422` (`deny_unknown_fields`).
 
 Resources can be addressed by UUID **or** slug: `{id_or_slug}`. Slugs are derived from
 the title and deduped (`hello-world`, `hello-world-<id8>` on collision, also on retitle).
-Pagination: `?page` (default `1`), `?per_page` (default `20`, max `100`); list responses
-are `{ posts, total, page, per_page }`.
+Pagination: `?page` (default `1`), `?per_page` (default `20`, max `100`); paginated
+list responses are `{ posts|users, total, page, per_page }` (see Posts, Admin).
+Sort: newest-first by default with an `id` tiebreaker (stable across pages);
+`GET /posts` and `GET /admin/users` accept `?order=asc|desc` (anything else → `400`).
+`GET /posts/{id}/comments` returns the full nested tree chronologically
+(`created_at, id` — intentionally unpaginated); `GET /tags` returns all tags A–Z
+(low cardinality, intentionally unpaginated).
 
 Every response carries an `x-request-id` header (client-sent value honored if sane,
 otherwise a UUID v4 is generated) — use it to correlate access-log lines with error
@@ -151,8 +156,9 @@ List items (`PostSummary`) are the same minus `content`/`updated_at`.
 
 ### `GET /api/v1/posts` — optional auth
 
-Query: `?page&per_page&tag&author&search` (`tag` matches slug or name,
-`author` matches username, `search` case-insensitive substring of title/content).
+Query: `?page&per_page&tag&author&search&order` (`tag` matches slug or name,
+`author` matches username, `search` case-insensitive substring of title/content,
+`order` `desc` default newest-first or `asc` oldest-first).
 
 Visibility (see matrix): anon → `published` only; user → published + own;
 moderator/admin → all. Drafts never leak to strangers (`404` on single fetch,
@@ -252,8 +258,9 @@ idempotent (`200` if already in that state).
 
 ### `GET /api/v1/admin/users`
 
-Lists all users including inactive, newest first. Moderators see everyone
-except admins.
+Paginated: `?page&per_page&order` (same defaults as posts). Returns
+`{ users, total, page, per_page }` including inactive users, newest first.
+Moderators see everyone except admins (`total` matches the visible set).
 
 ### `GET /api/v1/admin/users/{id}`
 

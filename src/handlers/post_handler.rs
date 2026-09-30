@@ -57,6 +57,15 @@ pub async fn list_posts(
 ) -> AppResult<Json<PostListResponse>> {
     let page = q.page.unwrap_or(1).max(1);
     let per_page = q.per_page.unwrap_or(20).clamp(1, 100);
+    let ascending = match q.order.as_deref().map(str::to_lowercase).as_deref() {
+        None | Some("desc") => false,
+        Some("asc") => true,
+        Some(_) => {
+            return Err(AppError::BadRequest(
+                "Invalid order (expected 'asc' or 'desc')".into(),
+            ));
+        }
+    };
 
     // Viewer-scoped visibility: anon -> published only, user -> published + own,
     // moderator/admin -> everything. `?published=` is ignored (kept for compat).
@@ -75,6 +84,7 @@ pub async fn list_posts(
         q.search.as_deref(),
         page,
         per_page,
+        ascending,
     )
     .await?;
 

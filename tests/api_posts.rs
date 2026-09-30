@@ -265,3 +265,52 @@ async fn list_supports_search_pagination_and_filters() {
         "{mod_body} vs {own_body}"
     );
 }
+
+#[tokio::test]
+async fn list_order_asc_desc_and_invalid() {
+    let mut c = TestClient::new(new_app().await);
+    let (admin_token, _) = make_admin(&mut c, &format!("root_{}", uid())).await;
+    let (token, _, _) = register_user(&mut c, &format!("author_{}", uid())).await;
+    // Created seconds apart at most — same-second ties exercise the id tiebreaker.
+    for _ in 0..4 {
+        make_published_post(&mut c, &token, &admin_token, &format!("Order {}", uid())).await;
+    }
+
+    let (status, desc) = c.get("/api/v1/posts?per_page=100", None).await;
+    assert_eq!(status, StatusCode::OK, "{desc}");
+    let (status, asc) = c.get("/api/v1/posts?per_page=100&order=asc", None).await;
+    assert_eq!(status, StatusCode::OK, "{asc}");
+    let desc_ids: Vec<&str> = desc["posts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|p| p["id"].as_str())
+        .collect();
+    let mut asc_ids: Vec<&str> = asc["posts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|p| p["id"].as_str())
+        .collect();
+    assert!(desc_ids.len() >= 4);
+    asc_ids.reverse();
+    assert_eq!(desc_ids, asc_ids, "asc must be the exact reverse of desc");
+
+    // Pages are stable across repeated reads (deterministic tiebreaker).
+    let (status, again) = c.get("/api/v1/posts?per_page=100", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let again_ids: Vec<&str> = again["posts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|p| p["id"].as_str())
+        .collect();
+    assert_eq!(desc_ids, again_ids);
+
+    // Invalid order rejected.
+    let (status, _) = c.get("/api/v1/posts?order=sideways", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // Case-insensitive.
+    let (status, _) = c.get("/api/v1/posts?order=ASC", None).await;
+    assert_eq!(status, StatusCode::OK);
+}

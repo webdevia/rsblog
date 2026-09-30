@@ -91,12 +91,12 @@ examples: see **[docs/API.md](docs/API.md)**.
 | Level       | Location | How | Count |
 | ----------- | -------- | --- | ----- |
 | Unit        | `#[cfg(test)]` in `src/` | `cargo test --lib` | 32 |
-| Integration | `tests/api_*.rs` + `tests/common/` | `cargo test --test api_auth ...` | 53 |
+| Integration | `tests/api_*.rs` + `tests/common/` | `cargo test --test api_auth ...` | 54 |
 | E2E         | `tests/e2e_lifecycle.rs` | live server on ephemeral port via `reqwest` | 1 |
 | Shell       | `test_api.sh` | needs running server + `jq` | — |
 
 ```bash
-cargo test                          # all 86 tests (isolated temp SQLite DBs)
+cargo test                          # all 87 tests (isolated temp SQLite DBs)
 cargo test --features all-databases --lib
 cargo clippy --all-targets
 cargo fmt --all -- --check

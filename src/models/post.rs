@@ -107,4 +107,6 @@ pub struct PostQuery {
     pub author: Option<String>,
     pub search: Option<String>,
     pub published: Option<bool>,
+    /// `desc` (default, newest first) or `asc` (oldest first).
+    pub order: Option<String>,
 }

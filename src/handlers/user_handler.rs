@@ -2,7 +2,7 @@ use crate::{
     auth::middleware::{require_role, AuthUser},
     db::DbPool,
     errors::{AppError, AppResult},
-    models::user::{Role, UpdateUserRoleRequest, UserResponse},
+    models::user::{AdminUsersQuery, Role, UpdateUserRoleRequest, UserResponse},
     repositories::user_repo,
 };
 use axum::{
@@ -51,18 +51,32 @@ pub async fn get_me(
 pub async fn list_users(
     State(pool): State<DbPool>,
     Extension(auth_user): Extension<AuthUser>,
-) -> AppResult<Json<Vec<UserResponse>>> {
+    Query(q): Query<AdminUsersQuery>,
+) -> AppResult<Json<crate::models::user::UserListResponse>> {
     require_role(&auth_user, Role::Moderator)?;
-    let mut users: Vec<UserResponse> = user_repo::list_all(&pool)
-        .await?
-        .into_iter()
-        .map(Into::into)
-        .collect();
+    let page = q.page.unwrap_or(1).max(1);
+    let per_page = q.per_page.unwrap_or(20).clamp(1, 100);
+    let ascending = match q.order.as_deref().map(str::to_lowercase).as_deref() {
+        None | Some("desc") => false,
+        Some("asc") => true,
+        Some(_) => {
+            return Err(AppError::BadRequest(
+                "Invalid order (expected 'asc' or 'desc')".into(),
+            ));
+        }
+    };
+    let exclude_admins = auth_user.role == Role::Moderator;
+    let (rows, total) =
+        user_repo::list_paginated(&pool, page, per_page, ascending, exclude_admins).await?;
     // Moderators don't see admin accounts (no roster leak); admins see all.
-    if auth_user.role == Role::Moderator {
-        users.retain(|u| u.role != Role::Admin.as_str());
-    }
-    Ok(Json(users))
+    // (Enforced in SQL so `total` matches the visible set.)
+    let users: Vec<UserResponse> = rows.into_iter().map(Into::into).collect();
+    Ok(Json(crate::models::user::UserListResponse {
+        users,
+        total,
+        page,
+        per_page,
+    }))
 }
 
 pub async fn get_user(

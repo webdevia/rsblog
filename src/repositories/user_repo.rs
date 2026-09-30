@@ -57,12 +57,53 @@ pub async fn list_all(pool: &DbPool) -> AppResult<Vec<User>> {
              CAST(is_active AS BOOLEAN) as is_active, \
              CAST(created_at AS TEXT) as created_at, \
              CAST(updated_at AS TEXT) as updated_at \
-             FROM users ORDER BY created_at DESC",
+             FROM users ORDER BY created_at DESC, id DESC",
         )
         .fetch_all(p)
         .await?
     });
     Ok(users)
+}
+
+/// Paginated user listing with deterministic order (`id` tiebreaker guards
+/// equal `created_at` values). `exclude_admins` hides admin accounts
+/// (moderator view). Returns `(rows, total)`.
+pub async fn list_paginated(
+    pool: &DbPool,
+    page: i64,
+    per_page: i64,
+    ascending: bool,
+    exclude_admins: bool,
+) -> AppResult<(Vec<User>, i64)> {
+    let offset = (page - 1) * per_page;
+    let direction = if ascending { "ASC" } else { "DESC" };
+    let filter = if exclude_admins {
+        "WHERE role != 'admin'"
+    } else {
+        ""
+    };
+    // SAFETY: `direction`/`filter` are static literals derived from bools.
+    let data_sql = format!(
+        "SELECT id, username, email, password_hash, role, \
+         CAST(is_active AS BOOLEAN) as is_active, \
+         CAST(created_at AS TEXT) as created_at, \
+         CAST(updated_at AS TEXT) as updated_at \
+         FROM users {filter} ORDER BY created_at {direction}, id {direction} \
+         LIMIT $1 OFFSET $2"
+    );
+    let count_sql = format!("SELECT COUNT(*) FROM users {filter}");
+    let (rows, total) = db_query!(pool, |p| {
+        let total = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(count_sql.as_str()))
+            .fetch_one(p)
+            .await?;
+        let rows = sqlx::query_as::<_, User>(sqlx::AssertSqlSafe(data_sql.as_str()))
+            .bind(per_page)
+            .bind(offset)
+            .fetch_all(p)
+            .await?;
+        (rows, total)
+    });
+    Ok((rows, total))
 }
 
 pub async fn update_role(pool: &DbPool, id: &str, role: &str) -> AppResult<u64> {

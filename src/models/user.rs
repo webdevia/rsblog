@@ -81,6 +81,22 @@ pub struct AuthResponse {
     pub user: UserResponse,
 }
 
+#[derive(Debug, Serialize)]
+pub struct UserListResponse {
+    pub users: Vec<UserResponse>,
+    pub total: i64,
+    pub page: i64,
+    pub per_page: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AdminUsersQuery {
+    pub page: Option<i64>,
+    pub per_page: Option<i64>,
+    /// `desc` (default, newest first) or `asc` (oldest first).
+    pub order: Option<String>,
+}
+
 #[derive(Debug, Deserialize, Validate)]
 pub struct RegisterRequest {
     #[validate(length(min = 3, max = 30))]
