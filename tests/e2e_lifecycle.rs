@@ -108,7 +108,13 @@ impl E2E {
         (token, username)
     }
 
-    async fn phase_posts(&self, token: &str, tag_id: &str, tag_slug: &str) -> (String, String) {
+    async fn phase_posts(
+        &self,
+        token: &str,
+        admin_token: &str,
+        tag_id: &str,
+        tag_slug: &str,
+    ) -> (String, String) {
         let title = format!("Asynchronous Programming in Rust {}", self.run);
         let post = self
             .call(
@@ -127,6 +133,17 @@ impl E2E {
             .await;
         let post_id = post["id"].as_str().unwrap().to_owned();
         let slug = post["slug"].as_str().unwrap().to_owned();
+        // Regular users create drafts; publish via admin before public checks.
+        if !post["published"].as_bool().unwrap_or(false) {
+            self.call(
+                "POST",
+                &format!("/posts/{post_id}/publish"),
+                Some(admin_token),
+                None,
+                StatusCode::OK,
+            )
+            .await;
+        }
 
         self.call("GET", "/posts", None, None, StatusCode::OK).await;
         let search = self
@@ -358,6 +375,9 @@ async fn full_system_lifecycle_over_http() {
         admin_email: "admin@blog.com".into(),
         admin_password: None,
         cors_origins: vec![],
+        log_format: "text".into(),
+        log_include_query: false,
+        slow_request_ms: 0,
     };
     let pool = DbPool::init(&config).await;
 
@@ -427,7 +447,9 @@ async fn full_system_lifecycle_over_http() {
 
     let (admin_token, tag_id, tag_slug) = e2e.phase_admin_setup().await;
     let (user_token, _) = e2e.phase_user_lifecycle().await;
-    let (post_id, _slug) = e2e.phase_posts(&user_token, &tag_id, &tag_slug).await;
+    let (post_id, _slug) = e2e
+        .phase_posts(&user_token, &admin_token, &tag_id, &tag_slug)
+        .await;
     let attacker_token = e2e.phase_security(&post_id).await;
     e2e.phase_comments(&post_id, &user_token, &attacker_token)
         .await;

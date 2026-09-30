@@ -69,6 +69,15 @@ Fill in, at minimum:
 | `ADMIN_PASSWORD`    | strong password, ≥ 12 chars (seeded once)          |
 | `CORS_ORIGINS`      | `https://blog.example.com` (or your frontend URL)  |
 
+Optional observability overrides (compose defaults in brackets — unset is fine):
+
+| Variable            | Default | Notes                                              |
+| ------------------- | ------- | -------------------------------------------------- |
+| `LOG_FORMAT`        | `json`  | `text` for human-readable logs when debugging      |
+| `LOG_INCLUDE_QUERY` | `false` | `true` appends `?query` to access-log paths        |
+| `SLOW_REQUEST_MS`   | `1000`  | slow-request warn threshold, `0` disables          |
+| `RUST_LOG`          | info…   | `blog_api=debug` temporarily when troubleshooting  |
+
 ## 3. First deploy
 
 ```bash
@@ -85,6 +94,7 @@ Verify, from your own machine:
 ```bash
 curl -sI https://blog.example.com/health
 # HTTP/2 200 ... strict-transport-security: max-age=63072000; ...
+# ... x-request-id: <uuid>  (every response carries one)
 
 TOKEN=$(curl -s -X POST https://blog.example.com/api/v1/auth/login \
   -H 'Content-Type: application/json' \
@@ -161,6 +171,7 @@ free -m                           # host-level pressure + swap use
 | `postgres` unhealthy | data volume perms or OOM; `docker compose logs postgres`; never delete `pgdata` without a dump |
 | `401` everywhere after deploy | wrong `JWT_SECRET` vs the one that signed existing tokens — tokens signed by the old secret are invalid; users just log in again |
 | Site slow, swap growing | something exceeds caps; `docker stats` shows who; typical healthy idle: pg ~120, api ~25, caddy ~20 MB |
+| Errors or slowness in logs | api logs one JSON line per request (`slow request` warnings past `SLOW_REQUEST_MS`); correlate with `x-request-id`: `docker compose logs api \| grep '<request-id>'`; `/health` hits are excluded from access logs |
 | Need a shell in prod | `docker compose exec postgres psql -U blog_user blog_db` (DB port is intentionally unpublished) |
 
 ## 7. Files involved

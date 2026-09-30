@@ -1,5 +1,6 @@
 use crate::{
     auth::jwt::{verify_token, Claims},
+    db::DbPool,
     errors::{AppError, AppResult},
     models::user::Role,
     repositories::user_repo,
@@ -7,7 +8,7 @@ use crate::{
 };
 use axum::{
     extract::{Request, State},
-    http::header::AUTHORIZATION,
+    http::{header::AUTHORIZATION, HeaderMap},
     middleware::Next,
     response::Response,
 };
@@ -72,6 +73,29 @@ fn extract_claims(req: &Request, jwt_secret: &str) -> AppResult<Claims> {
         .strip_prefix("Bearer ")
         .ok_or(AppError::Unauthorized)?;
     Ok(verify_token(token, jwt_secret)?.claims)
+}
+
+/// Optional auth for public endpoints with viewer-scoped visibility.
+/// Returns `None` for anonymous / invalid / deactivated tokens (never errors).
+pub async fn try_auth_from_headers(
+    pool: &DbPool,
+    jwt_secret: &str,
+    headers: &HeaderMap,
+) -> Option<AuthUser> {
+    use crate::auth::jwt::verify_token;
+    let header = headers.get(AUTHORIZATION)?.to_str().ok()?;
+    let token = header.strip_prefix("Bearer ")?;
+    let claims = verify_token(token, jwt_secret).ok()?.claims;
+    // `find_by_id` returns `AppResult<Option<User>>`; treat DB errors as anonymous.
+    let user = user_repo::find_by_id(pool, &claims.sub).await.ok()??;
+    if !user.is_active {
+        return None;
+    }
+    Some(AuthUser {
+        id: user.id.clone(),
+        username: user.username.clone(),
+        role: Role::from_str(&user.role),
+    })
 }
 
 pub fn require_role(user: &AuthUser, required: Role) -> AppResult<()> {

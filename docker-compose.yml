@@ -96,6 +96,9 @@ services:
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET (64+ chars) in .env}
       JWT_EXPIRATION_HOURS: ${JWT_EXPIRATION_HOURS:-24}
       RUST_LOG: ${RUST_LOG:-blog_api=info,tower_http=info,sqlx=warn}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      LOG_INCLUDE_QUERY: ${LOG_INCLUDE_QUERY:-false}
+      SLOW_REQUEST_MS: ${SLOW_REQUEST_MS:-1000}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@blog.com}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}

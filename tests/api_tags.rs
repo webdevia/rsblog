@@ -146,9 +146,9 @@ async fn list_tags_reports_post_counts_and_filters_posts() {
     let tag_name = format!("tokio_{}", uid());
     let (tag_id, tag_slug) = make_tag(&mut c, &admin_token, &tag_name).await;
 
-    // Attach the tag to a post via tag_ids.
+    // Attach the tag to a post via tag_ids (created as draft, then published).
     let title = format!("Tagged {}", uid());
-    let (status, _) = c
+    let (status, body) = c
         .post(
             "/api/v1/posts",
             Some(&user_token),
@@ -158,6 +158,19 @@ async fn list_tags_reports_post_counts_and_filters_posts() {
                 "published": true,
                 "tag_ids": [tag_id],
             }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["published"], false,
+        "regular users always create drafts"
+    );
+    let draft_id = body["id"].as_str().unwrap().to_owned();
+    let (status, _) = c
+        .post(
+            &format!("/api/v1/posts/{draft_id}/publish"),
+            Some(&admin_token),
+            serde_json::json!({}),
         )
         .await;
     assert_eq!(status, StatusCode::OK);

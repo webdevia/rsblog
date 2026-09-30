@@ -109,3 +109,102 @@ async fn deactivation_locks_account_and_cannot_target_self() {
         .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn activate_deactivate_rbac_and_404() {
+    let mut c = TestClient::new(new_app().await);
+    let (admin_token, admin_id) = make_admin(&mut c, &format!("root_{}", uid())).await;
+    let (user_token, user_id, _) = register_user(&mut c, &format!("user_{}", uid())).await;
+    let (mod_token, mod_id, _) = register_user(&mut c, &format!("mod_{}", uid())).await;
+    let (status, _) = c
+        .put(
+            &format!("/api/v1/admin/users/{mod_id}/role"),
+            Some(&admin_token),
+            serde_json::json!({"role": "moderator"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    for endpoint in ["deactivate", "activate"] {
+        let uri = format!("/api/v1/admin/users/{user_id}/{endpoint}");
+        let (status, _) = c.post(&uri, None, serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{endpoint} anon");
+        let (status, _) = c.post(&uri, Some(&user_token), serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{endpoint} user");
+        let (status, _) = c.post(&uri, Some(&mod_token), serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{endpoint} mod");
+        let (status, _) = c
+            .post(
+                &format!("/api/v1/admin/users/no-such-id/{endpoint}"),
+                Some(&admin_token),
+                serde_json::json!({}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{endpoint} unknown");
+    }
+
+    // Cannot activate yourself.
+    let (status, _) = c
+        .post(
+            &format!("/api/v1/admin/users/{admin_id}/activate"),
+            Some(&admin_token),
+            serde_json::json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn deactivation_revokes_write_tokens_and_reactivate_restores() {
+    let mut c = TestClient::new(new_app().await);
+    let (admin_token, _) = make_admin(&mut c, &format!("root_{}", uid())).await;
+    let (token, user_id, username) = register_user(&mut c, &format!("user_{}", uid())).await;
+
+    // Deactivate twice: idempotent 200.
+    for _ in 0..2 {
+        let (status, _) = c
+            .post(
+                &format!("/api/v1/admin/users/{user_id}/deactivate"),
+                Some(&admin_token),
+                serde_json::json!({}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    // Old token cannot write.
+    let (status, _) = c
+        .post(
+            "/api/v1/posts",
+            Some(&token),
+            serde_json::json!({"title": format!("X {}", uid()), "content": "x"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Reactivate: account works again. Note: JWTs are stateless + DB-revalidated
+    // for `is_active`, so a non-expired pre-deactivation token becomes valid
+    // again (no versioning). Clients should still re-login to be safe.
+    let (status, _) = c
+        .post(
+            &format!("/api/v1/admin/users/{user_id}/activate"),
+            Some(&admin_token),
+            serde_json::json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = c.get("/api/v1/users/me", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = c
+        .post(
+            "/api/v1/auth/login",
+            None,
+            serde_json::json!({"username": username, "password": "SecurePassword123"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let fresh = body["token"].as_str().unwrap().to_owned();
+    let (status, _) = c.get("/api/v1/users/me", Some(&fresh)).await;
+    assert_eq!(status, StatusCode::OK);
+}

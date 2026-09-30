@@ -90,6 +90,12 @@ pub struct Config {
     pub admin_password: Option<String>,
     /// Empty = reflect any origin (previous behaviour, logs a warning).
     pub cors_origins: Vec<String>,
+    /// `text` (dev default) or `json` (prod default via compose).
+    pub log_format: String,
+    /// Append `?query` to access-log paths. Default `false` (query may be PII).
+    pub log_include_query: bool,
+    /// `warn!` on requests slower than this (ms). `0` disables. Default `1000`.
+    pub slow_request_ms: u64,
 }
 
 impl Config {
@@ -156,6 +162,22 @@ impl Config {
             cors_origins: crate::security::parse_cors_origins(
                 env::var("CORS_ORIGINS").ok().as_deref(),
             ),
+            log_format: {
+                let f = env::var("LOG_FORMAT")
+                    .unwrap_or_else(|_| "text".to_string())
+                    .to_lowercase();
+                if f != "text" && f != "json" {
+                    panic!("LOG_FORMAT must be 'text' or 'json'");
+                }
+                f
+            },
+            log_include_query: env::var("LOG_INCLUDE_QUERY")
+                .ok()
+                .is_some_and(|v| matches!(v.to_lowercase().as_str(), "true" | "1" | "yes")),
+            slow_request_ms: env::var("SLOW_REQUEST_MS")
+                .unwrap_or_else(|_| "1000".to_string())
+                .parse()
+                .expect("SLOW_REQUEST_MS must be a number"),
         }
     }
 }

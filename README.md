@@ -5,12 +5,14 @@ A RESTful blog API written in Rust with [Axum](https://github.com/tokio-rs/axum)
 ## Features
 
 - **Auth**: registration/login with Argon2 password hashing and JWT (HS256) tokens
-- **RBAC**: `user` / `moderator` / `admin` roles; deactivated users have live tokens revoked via per-request DB revalidation
-- **Posts**: create/list/search, pagination, tag/author filters, drafts (owner-only preview), slug dedup on create and retitle
+- **RBAC**: `user` / `moderator` / `admin` roles; deactivated users have live tokens revoked via per-request DB revalidation (reactivation revives non-expired tokens)
+- **Posts**: viewer-scoped list/search (anon: published only; user: published + own drafts; mod/admin: all), pagination, tag/author filters, slug dedup on create and retitle; users always create drafts, moderators/admins may publish in one shot or via `/publish`|`/unpublish`; `published` removed from `PUT`
 - **Tags**: CRUD with post counts; looked up by id or slug
-- **Comments**: nested tree (materialized path, max depth 10), soft-delete preserves children (`[deleted]`), hard-delete removes leaves
-- **Admin**: list users, change roles, deactivate accounts
+- **Comments**: nested tree (materialized path, max depth 10), soft-delete preserves children (`[deleted]`), hard-delete removes leaves; draft comment trees mirror post visibility; comments can only be created on published posts
+- **Moderation**: moderators/admins can edit/delete/publish any post or comment **except** moderators cannot touch admin-owned content (`403`)
+- **Admin**: list users, change roles, deactivate/activate accounts (idempotent, `404` on unknown id, cannot self-target)
 - **Ops**: health endpoints, graceful shutdown, per-IP rate limiting (1 req/s, burst 60), configurable CORS, 10 MB body limit, 30 s request timeout
+- **Observability**: one `INFO` access line per request, `x-request-id` on every response, `LOG_FORMAT=text|json`, slow-request warnings (see below)
 - **Hardening (no proxy needed)**: OWASP security headers on every response, CORS allowlist via `CORS_ORIGINS` (TLS termination itself stays out of the app — use an edge proxy for HTTPS)
 
 ## Tech stack
@@ -64,59 +66,37 @@ Backend resolution: `DATABASE_BACKEND` env var → URL scheme auto-detect → bu
 | `ADMIN_PASSWORD`       | no       | —                    | min 12 chars; unset = skip seeding       |
 | `CORS_ORIGINS`         | no       | reflect any origin   | comma-separated allowlist, e.g. `https://app.example` |
 | `RUST_LOG`             | no       | `blog_api=debug,...` | tracing filter                           |
+| `LOG_FORMAT`           | no       | `text`               | `text` (dev) or `json` (prod via compose) |
+| `LOG_INCLUDE_QUERY`    | no       | `false`              | `true` appends `?query` to access-log paths |
+| `SLOW_REQUEST_MS`      | no       | `1000`               | `warn!` threshold for slow requests (`0` disables) |
 
 Never commit `.env` (already git-ignored; only `.env.example` is tracked).
 
+## Observability
+
+One `INFO` access line per request (`method path status latency_ms client_ip request_id`;
+`5xx` at error level, slow requests at warn level). Every response carries an
+`x-request-id` header (client-sent value honored, otherwise UUID v4) for correlating
+access lines with error logs. `/health` is excluded from access logs (Docker polls it
+every 15s). Bodies and headers are never logged; query strings only with
+`LOG_INCLUDE_QUERY=true`. Details: **[docs/API.md](docs/API.md)**.
+
 ## API reference
 
-Base path: `/api/v1`. Health also at top-level `/health` (for load balancers).
-
-| Method | Path                                        | Auth              | Description                          |
-| ------ | ------------------------------------------- | ----------------- | ------------------------------------ |
-| GET    | `/health`, `/api/v1/health`                 | no                | `{"status":"ok","version":"..."}`    |
-| POST   | `/api/v1/auth/register`                     | no                | `{username, email, password}` → token |
-| POST   | `/api/v1/auth/login`                        | no                | `{username, password}` → token       |
-| GET    | `/api/v1/users/me`                          | user              | own profile                          |
-| GET    | `/api/v1/posts`                             | no                | list; `?page&per_page&tag&author&search&published` |
-| POST   | `/api/v1/posts`                             | user              | `{title, content, excerpt?, published?, tag_ids?}` |
-| GET    | `/api/v1/posts/{id_or_slug}`                | optional*         | single post (`*`drafts: owner/moderator only) |
-| PUT    | `/api/v1/posts/{id_or_slug}`                | owner/moderator   | partial update                       |
-| DELETE | `/api/v1/posts/{id_or_slug}`                | owner/moderator   | delete post                          |
-| GET    | `/api/v1/posts/{id_or_slug}/comments`       | no                | nested comment tree                  |
-| POST   | `/api/v1/posts/{id_or_slug}/comments`       | user              | `{content, parent_id?}` (published posts only) |
-| PUT    | `/api/v1/posts/{id_or_slug}/comments/{cid}` | owner/moderator   | edit comment                         |
-| DELETE | `/api/v1/posts/{id_or_slug}/comments/{cid}` | owner/moderator   | soft- or hard-delete                 |
-| GET    | `/api/v1/tags`                              | no                | tags with post counts                |
-| POST   | `/api/v1/tags`                              | moderator         | `{name}`                             |
-| GET    | `/api/v1/tags/{id_or_slug}`                 | no                | single tag                           |
-| PUT    | `/api/v1/tags/{id_or_slug}`                 | moderator         | rename tag                           |
-| DELETE | `/api/v1/tags/{id_or_slug}`                 | admin             | delete tag                           |
-| GET    | `/api/v1/admin/users`                       | admin             | list users                           |
-| PUT    | `/api/v1/admin/users/{id}/role`             | admin             | `{role: admin\|moderator\|user}`      |
-| POST   | `/api/v1/admin/users/{id}/deactivate`       | admin             | lock account (cannot self-target)    |
-
-Auth: `Authorization: Bearer <token>`. Errors are JSON: `{"error": {"status": <code>, "message": "..."}}`.
-
-Quick smoke test:
-
-```bash
-TOKEN=$(curl -s -X POST localhost:3000/api/v1/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"Admin@123456"}' | jq -r .token)
-curl -s localhost:3000/api/v1/posts | jq .
-```
+Full endpoint reference, request/response schemas, status codes, RBAC matrix and curl
+examples: see **[docs/API.md](docs/API.md)**.
 
 ## Testing
 
 | Level       | Location | How | Count |
 | ----------- | -------- | --- | ----- |
-| Unit        | `#[cfg(test)]` in `src/` | `cargo test --lib` | 27 |
-| Integration | `tests/api_*.rs` + `tests/common/` | `cargo test --test api_auth ...` | 33 |
+| Unit        | `#[cfg(test)]` in `src/` | `cargo test --lib` | 32 |
+| Integration | `tests/api_*.rs` + `tests/common/` | `cargo test --test api_auth ...` | 47 |
 | E2E         | `tests/e2e_lifecycle.rs` | live server on ephemeral port via `reqwest` | 1 |
 | Shell       | `test_api.sh` | needs running server + `jq` | — |
 
 ```bash
-cargo test                          # all 61 tests (isolated temp SQLite DBs)
+cargo test                          # all 80 tests (isolated temp SQLite DBs)
 cargo test --features all-databases --lib
 cargo clippy --all-targets
 cargo fmt --all -- --check
@@ -126,6 +106,7 @@ cargo run & sleep 2 && bash test_api.sh
 ```
 
 Integration tests exercise the router in-process (`tower::oneshot`) with a fresh migrated temp DB per test, so they run in parallel without interference.
+New suites: `tests/api_moderation.rs` (publishing workflow, viewer-scoped lists, mod≠admin guards, draft comment visibility) and extended `tests/api_admin.rs` (activate/deactivate `404`/RBAC/idempotency/reactivation).
 
 ## Production (Docker + PostgreSQL)
 
@@ -134,7 +115,7 @@ Integration tests exercise the router in-process (`tower::oneshot`) with a fresh
 | Service    | Cap    | Tuning highlights |
 | ---------- | ------ | ----------------- |
 | `postgres` | 224 MB | `postgres:16-alpine`, `shared_buffers=64MB`, `work_mem=2MB`, `max_connections=30` (app pool uses max 20), port not published, 30 s graceful stop |
-| `api`      | 96 MB  | binds `0.0.0.0:3000`, port localhost-only, `RUST_LOG` info by default, capped json-file logs |
+| `api`      | 96 MB  | binds `0.0.0.0:3000`, port localhost-only, `RUST_LOG` info + JSON access logs with `x-request-id` by default, capped json-file logs |
 | `caddy`    | 64 MB  | `caddy:2-alpine` edge proxy: auto-TLS, HSTS, gzip, `:80`/`:443` |
 
 Caps sum to 384 MB, under the ~416 MB available on a 560 MB box (typical use is ~200 MB; the 1 GB swap is only a backstop).
@@ -164,10 +145,11 @@ src/
   routes.rs        # route table + AppState + health handler
   config.rs        # env config + backend resolution/validation
   db.rs            # DbPool (sqlite/postgres) + pool tuning + migrations
-  errors.rs        # AppError -> HTTP status mapping
-  auth/            # jwt, argon2 passwords, auth middleware (DB-revalidated)
-  handlers/        # auth, post, comment, tag, user endpoints
-  models/          # request/response shapes + Role
+   errors.rs        # AppError -> HTTP status mapping
+   auth/            # jwt, argon2 passwords, auth middleware (DB-revalidated)
+   handlers/        # auth, post, comment, tag, user endpoints
+   logging.rs       # access log + x-request-id + subscriber init
+   models/          # request/response shapes + Role
   repositories/    # SQL queries via db_query! dispatch macro
   validators.rs    # request validation + slugify
   rate_limiter.rs  # governor-based per-IP limiting
@@ -177,5 +159,7 @@ tests/
   e2e_lifecycle.rs # full HTTP lifecycle over a live server
 migrations/{sqlite,postgres}/
 test_api.sh        # shell end-to-end lifecycle script
+docs/API.md        # full REST reference (endpoint details, schemas, RBAC)
+DEPLOY.md          # VPS deploy procedure
 Dockerfile, docker-compose.yml, Caddyfile, .env.prod.example, .dockerignore
 ```

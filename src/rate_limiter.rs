@@ -27,14 +27,14 @@ impl RateLimiterState {
     }
 }
 
-/// Resolve the client IP for rate limiting.
+/// Resolve the client IP for logging and rate limiting.
 ///
 /// When running behind the bundled Caddy proxy, Caddy *overwrites*
 /// `X-Real-IP` with the peer address it actually sees, so it cannot be
 /// spoofed through the proxy — provided the api port is not directly
 /// reachable (the compose file binds it to localhost for this reason).
 /// Direct connections fall back to the socket address.
-fn client_ip(request: &Request, addr: &std::net::SocketAddr) -> IpAddr {
+pub(crate) fn client_ip(request: &Request, addr: &std::net::SocketAddr) -> IpAddr {
     request
         .headers()
         .get("x-real-ip")

@@ -90,12 +90,12 @@ pub struct CreatePostRequest {
 }
 
 #[derive(Debug, Deserialize, Validate)]
+#[serde(deny_unknown_fields)]
 pub struct UpdatePostRequest {
     #[validate(length(min = 1, max = 200))]
     pub title: Option<String>,
     pub content: Option<String>,
     pub excerpt: Option<String>,
-    pub published: Option<bool>,
     pub tag_ids: Option<Vec<String>>,
 }
 

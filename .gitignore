@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 !.env.prod.example
+!.env.postgres.example
 *.db
 *.db-shm
 *.db-wal

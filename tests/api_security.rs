@@ -59,3 +59,43 @@ async fn cors_preflight_allows_configured_method_and_headers() {
     // Default (CORS_ORIGINS unset): permissive, reflects the origin.
     assert!(resp.headers().contains_key("access-control-allow-origin"));
 }
+
+#[tokio::test]
+async fn request_id_generated_echoed_and_unique() {
+    async fn get_id(
+        app: &common::TestApp,
+        uri: &str,
+        send_id: Option<&str>,
+    ) -> (StatusCode, String) {
+        let mut builder = Request::builder().uri(uri);
+        if let Some(id) = send_id {
+            builder = builder.header("x-request-id", id);
+        }
+        let resp = app
+            .router
+            .clone()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let id = resp.headers()["x-request-id"].to_str().unwrap().to_owned();
+        (status, id)
+    }
+
+    let app = new_app().await;
+    // Generated when absent...
+    let (status, id1) = get_id(&app, "/api/v1/posts", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!id1.is_empty());
+    // ...unique per request...
+    let (_, id2) = get_id(&app, "/api/v1/posts", None).await;
+    assert_ne!(id1, id2);
+    // ...honored and echoed when the client sends one...
+    let (status, echoed) = get_id(&app, "/api/v1/posts", Some("test-id-123")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(echoed, "test-id-123");
+    // ...and present on errors too.
+    let (status, err_id) = get_id(&app, "/no-such-route", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(!err_id.is_empty());
+}

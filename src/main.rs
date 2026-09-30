@@ -6,13 +6,13 @@ compile_error!(
 );
 
 use std::net::SocketAddr;
-use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer, trace::TraceLayer};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer};
 
 use blog_api::{
     auth,
     config::{Config, DatabaseBackend},
     db::DbPool,
+    logging::{self, AccessLogConfig},
     rate_limiter::{rate_limit_middleware, RateLimiterState},
     repositories::user_repo,
     routes::{create_router, AppState},
@@ -22,13 +22,7 @@ use blog_api::{
 async fn main() {
     dotenvy::dotenv().ok();
 
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "blog_api=debug,tower_http=debug".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    logging::init_subscriber();
 
     print_build_info();
 
@@ -44,20 +38,29 @@ async fn main() {
     // Rate limiting: 60 requests per minute (avg 1 req/sec) with burst capacity of 60
     let rate_limiter_state = RateLimiterState::new(1, 60);
 
-    let app = create_router(state)
-        .layer(TraceLayer::new_for_http())
-        .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024))
-        // Bound total handler time so one slow request can't hold a
-        // connection (and a DB pool slot) forever. 408 on expiry.
-        .layer(TimeoutLayer::with_status_code(
-            axum::http::StatusCode::REQUEST_TIMEOUT,
-            std::time::Duration::from_secs(30),
-        ))
-        // Apply our custom IP rate limiter middleware
-        .layer(axum::middleware::from_fn_with_state(
-            rate_limiter_state,
-            rate_limit_middleware,
-        ));
+    // NOTE: layers apply inside-out (last `.layer()` is outermost). The
+    // observability wrap is applied last so the access log + `x-request-id`
+    // cover every response, including 429/413/408 rejections from the
+    // deployment layers below it.
+    let app = logging::wrap_router(
+        create_router(state)
+            .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024))
+            // Bound total handler time so one slow request can't hold a
+            // connection (and a DB pool slot) forever. 408 on expiry.
+            .layer(TimeoutLayer::with_status_code(
+                axum::http::StatusCode::REQUEST_TIMEOUT,
+                std::time::Duration::from_secs(30),
+            ))
+            // Apply our custom IP rate limiter middleware
+            .layer(axum::middleware::from_fn_with_state(
+                rate_limiter_state,
+                rate_limit_middleware,
+            )),
+        AccessLogConfig {
+            include_query: config.log_include_query,
+            slow_request_ms: config.slow_request_ms,
+        },
+    );
 
     let addr: SocketAddr = format!("{}:{}", config.host, config.port)
         .parse()

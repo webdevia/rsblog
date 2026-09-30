@@ -125,6 +125,12 @@ EOF
 POST_RESP=$(call_api "POST" "/posts" 200 "$CREATE_POST_PAYLOAD" "$USER_TOKEN")
 POST_ID=$(echo "$POST_RESP" | jq -r '.id')
 POST_SLUG=$(echo "$POST_RESP" | jq -r '.slug')
+POST_PUBLISHED=$(echo "$POST_RESP" | jq -r '.published')
+
+# Standard users always create drafts; publish via admin before public checks.
+if [ "$POST_PUBLISHED" != "true" ]; then
+  call_api "POST" "/posts/${POST_ID}/publish" 200 "" "$ADMIN_TOKEN" > /dev/null
+fi
 
 # 2. Public Query List (Should find the newly published post)
 call_api "GET" "/posts" 200 "" > /dev/null

@@ -1,5 +1,5 @@
 use crate::{
-    auth::{jwt::verify_token, middleware::AuthUser},
+    auth::middleware::{try_auth_from_headers, AuthUser},
     config::Config,
     db::DbPool,
     errors::{AppError, AppResult},
@@ -9,7 +9,7 @@ use crate::{
 };
 use axum::{
     extract::{Extension, Path, Query, State},
-    http::{header::AUTHORIZATION, HeaderMap},
+    http::HeaderMap,
     Json,
 };
 
@@ -27,6 +27,9 @@ pub async fn create_post(
         slug
     };
 
+    // Users always create drafts; moderators/admins may publish in one shot.
+    let published = req.published && auth_user.role.has_permission(&Role::Moderator);
+
     post_repo::create(
         &pool,
         &id,
@@ -34,7 +37,7 @@ pub async fn create_post(
         &final_slug,
         &req.content,
         req.excerpt.as_deref(),
-        req.published,
+        published,
         &auth_user.id,
     )
     .await?;
@@ -48,15 +51,25 @@ pub async fn create_post(
 
 pub async fn list_posts(
     State(pool): State<DbPool>,
+    State(config): State<Config>,
+    headers: HeaderMap,
     Query(q): Query<PostQuery>,
 ) -> AppResult<Json<PostListResponse>> {
     let page = q.page.unwrap_or(1).max(1);
     let per_page = q.per_page.unwrap_or(20).clamp(1, 100);
-    let published_only = q.published.unwrap_or(true);
+
+    // Viewer-scoped visibility: anon -> published only, user -> published + own,
+    // moderator/admin -> everything. `?published=` is ignored (kept for compat).
+    let viewer = try_auth_from_headers(&pool, &config.jwt_secret, &headers).await;
+    let can_see_all = viewer
+        .as_ref()
+        .is_some_and(|u| u.role.has_permission(&Role::Moderator));
+    let viewer_id = viewer.as_ref().map(|u| u.id.as_str());
 
     let (rows, total) = post_repo::list(
         &pool,
-        published_only,
+        viewer_id,
+        can_see_all,
         q.author.as_deref(),
         q.tag.as_deref(),
         q.search.as_deref(),
@@ -108,8 +121,8 @@ pub async fn get_post(
         return build_post_response_from_post(&pool, &post).await;
     }
 
-    // Draft: require owner or moderator (optional auth).
-    let viewer = try_auth_from_headers(&pool, &config, &headers).await;
+    // Draft: require owner or moderator/admin (optional auth, 404-masked).
+    let viewer = try_auth_from_headers(&pool, &config.jwt_secret, &headers).await;
     match viewer {
         Some(u) if u.id == post.author_id || u.role.has_permission(&Role::Moderator) => {
             build_post_response_from_post(&pool, &post).await
@@ -118,23 +131,20 @@ pub async fn get_post(
     }
 }
 
-async fn try_auth_from_headers(
+async fn ensure_can_moderate_post(
     pool: &DbPool,
-    config: &Config,
-    headers: &HeaderMap,
-) -> Option<AuthUser> {
-    let header = headers.get(AUTHORIZATION)?.to_str().ok()?;
-    let token = header.strip_prefix("Bearer ")?;
-    let claims = verify_token(token, &config.jwt_secret).ok()?.claims;
-    let user = user_repo::find_by_id(pool, &claims.sub).await.ok()??;
-    if !user.is_active {
-        return None;
+    viewer: &AuthUser,
+    post_author_id: &str,
+) -> AppResult<()> {
+    // Moderators cannot touch admin-owned posts; admins can touch everything.
+    if viewer.role == Role::Moderator {
+        if let Some(author) = user_repo::find_by_id(pool, post_author_id).await? {
+            if Role::from_str(&author.role) == Role::Admin {
+                return Err(AppError::Forbidden);
+            }
+        }
     }
-    Some(AuthUser {
-        id: user.id.clone(),
-        username: user.username.clone(),
-        role: Role::from_str(&user.role),
-    })
+    Ok(())
 }
 
 pub async fn update_post(
@@ -152,11 +162,11 @@ pub async fn update_post(
     if post.author_id != auth_user.id && !auth_user.role.has_permission(&Role::Moderator) {
         return Err(AppError::Forbidden);
     }
+    ensure_can_moderate_post(&pool, &auth_user, &post.author_id).await?;
 
     let title = req.title.unwrap_or(post.title);
     let content = req.content.unwrap_or(post.content);
     let excerpt = req.excerpt.or(post.excerpt);
-    let published = req.published.unwrap_or(post.published);
     let mut new_slug = slugify(&title);
     // Avoid UNIQUE violation when retitling to an existing slug.
     if new_slug != post.slug && post_repo::slug_exists_excluding(&pool, &new_slug, &post_id).await?
@@ -164,14 +174,13 @@ pub async fn update_post(
         new_slug = format!("{}-{}", new_slug, &post_id[..8.min(post_id.len())]);
     }
 
-    post_repo::update(
+    post_repo::update_content(
         &pool,
         &post_id,
         &title,
         &new_slug,
         &content,
         excerpt.as_deref(),
-        published,
     )
     .await?;
 
@@ -197,9 +206,42 @@ pub async fn delete_post(
     if post.author_id != auth_user.id && !auth_user.role.has_permission(&Role::Moderator) {
         return Err(AppError::Forbidden);
     }
+    ensure_can_moderate_post(&pool, &auth_user, &post.author_id).await?;
 
     post_repo::delete(&pool, &post.id).await?;
     Ok(Json(serde_json::json!({"message": "Post deleted"})))
+}
+
+pub async fn publish_post(
+    State(pool): State<DbPool>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(key): Path<String>,
+) -> AppResult<Json<PostResponse>> {
+    if !auth_user.role.has_permission(&Role::Moderator) {
+        return Err(AppError::Forbidden);
+    }
+    let post = post_repo::find_by_id_or_slug(&pool, &key)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Post not found".into()))?;
+    ensure_can_moderate_post(&pool, &auth_user, &post.author_id).await?;
+    post_repo::set_published(&pool, &post.id, true).await?;
+    build_post_response(&pool, &post.id).await
+}
+
+pub async fn unpublish_post(
+    State(pool): State<DbPool>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(key): Path<String>,
+) -> AppResult<Json<PostResponse>> {
+    if !auth_user.role.has_permission(&Role::Moderator) {
+        return Err(AppError::Forbidden);
+    }
+    let post = post_repo::find_by_id_or_slug(&pool, &key)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Post not found".into()))?;
+    ensure_can_moderate_post(&pool, &auth_user, &post.author_id).await?;
+    post_repo::set_published(&pool, &post.id, false).await?;
+    build_post_response(&pool, &post.id).await
 }
 
 // --- Helper Functions ---

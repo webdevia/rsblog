@@ -17,6 +17,7 @@ use blog_api::{
     auth::password::hash_password,
     config::{Config, DatabaseBackend},
     db::DbPool,
+    logging::{wrap_router, AccessLogConfig},
     repositories::user_repo,
     routes::{create_router, AppState},
 };
@@ -44,6 +45,9 @@ fn test_config(db_path: &str) -> Config {
         admin_email: "admin@test.local".into(),
         admin_password: None,
         cors_origins: vec![],
+        log_format: "text".into(),
+        log_include_query: false,
+        slow_request_ms: 0,
     }
 }
 
@@ -56,16 +60,23 @@ pub struct TestApp {
 }
 
 /// Build an isolated app instance backed by a fresh temp SQLite database.
+/// Uses the same observability wrap as production (`x-request-id` + access log).
 pub async fn new_app() -> TestApp {
     let db_path =
         std::env::temp_dir().join(format!("rsblog-itest-{}-{}.db", std::process::id(), uid()));
     let db_path = db_path.to_string_lossy().into_owned();
     let config = test_config(&db_path);
     let pool = DbPool::init(&config).await;
-    let router = create_router(AppState {
-        pool: pool.clone(),
-        config: config.clone(),
-    });
+    let router = wrap_router(
+        create_router(AppState {
+            pool: pool.clone(),
+            config: config.clone(),
+        }),
+        AccessLogConfig {
+            include_query: false,
+            slow_request_ms: 0,
+        },
+    );
     TestApp {
         router,
         pool,
@@ -201,7 +212,7 @@ pub async fn make_admin(c: &mut TestClient, username: &str) -> (String, String) 
     )
 }
 
-/// Create a published post; returns `(post_id, slug)`.
+/// Create a post (may be draft for regular users); returns `(post_id, slug)`.
 pub async fn make_post(c: &mut TestClient, token: &str, title: &str) -> (String, String) {
     let (status, body) = c
         .post(
@@ -219,4 +230,76 @@ pub async fn make_post(c: &mut TestClient, token: &str, title: &str) -> (String,
         body["id"].as_str().unwrap().to_owned(),
         body["slug"].as_str().unwrap().to_owned(),
     )
+}
+
+/// Create a draft explicitly; returns `(post_id, slug)`.
+pub async fn make_draft(c: &mut TestClient, token: &str, title: &str) -> (String, String) {
+    let (status, body) = c
+        .post(
+            "/api/v1/posts",
+            Some(token),
+            serde_json::json!({
+                "title": title,
+                "content": format!("Content of {title}"),
+                "published": false,
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "create draft failed: {body}");
+    assert_eq!(body["published"], false);
+    (
+        body["id"].as_str().unwrap().to_owned(),
+        body["slug"].as_str().unwrap().to_owned(),
+    )
+}
+
+/// Publish a post via moderator/admin token; asserts success.
+pub async fn publish_post(c: &mut TestClient, mod_token: &str, post_id: &str) {
+    let (status, body) = c
+        .post(
+            &format!("/api/v1/posts/{post_id}/publish"),
+            Some(mod_token),
+            serde_json::json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "publish failed: {body}");
+    assert_eq!(body["published"], true);
+}
+
+/// Create a post as `author_token` then publish via `mod_token`.
+/// Returns `(post_id, slug)` of a published post.
+pub async fn make_published_post(
+    c: &mut TestClient,
+    author_token: &str,
+    mod_token: &str,
+    title: &str,
+) -> (String, String) {
+    let (post_id, slug) = make_post(c, author_token, title).await;
+    // Regular authors produce drafts; privileged authors may already be published.
+    let (status, body) = c
+        .get(&format!("/api/v1/posts/{post_id}"), Some(mod_token))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "fetch for publish check failed: {body}"
+    );
+    if body["published"] == false {
+        publish_post(c, mod_token, &post_id).await;
+        let (_, fresh) = c.get(&format!("/api/v1/posts/{post_id}"), None).await;
+        assert_eq!(fresh["slug"], slug);
+    }
+    (post_id, slug)
+}
+
+/// Promote `user_id` to moderator via `admin_token`; returns fresh role.
+pub async fn make_moderator(c: &mut TestClient, admin_token: &str, user_id: &str) {
+    let (status, body) = c
+        .put(
+            &format!("/api/v1/admin/users/{user_id}/role"),
+            Some(admin_token),
+            serde_json::json!({"role": "moderator"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "promote failed: {body}");
 }

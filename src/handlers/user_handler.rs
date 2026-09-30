@@ -65,7 +65,9 @@ pub async fn deactivate_user(
     if auth_user.id == user_id {
         return Err(AppError::BadRequest("Cannot deactivate yourself".into()));
     }
-    user_repo::deactivate(&pool, &user_id).await?;
+    if user_repo::deactivate(&pool, &user_id).await? == 0 {
+        return Err(AppError::NotFound("User not found".into()));
+    }
     Ok(Json(serde_json::json!({"message": "User deactivated"})))
 }
 
@@ -78,6 +80,8 @@ pub async fn activate_user(
     if auth_user.id == user_id {
         return Err(AppError::BadRequest("Cannot activate yourself".into()));
     }
-    user_repo::activate(&pool, &user_id).await?;
+    if user_repo::activate(&pool, &user_id).await? == 0 {
+        return Err(AppError::NotFound("User not found".into()));
+    }
     Ok(Json(serde_json::json!({"message": "User activated"})))
 }

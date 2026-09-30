@@ -3,7 +3,7 @@
 mod common;
 
 use axum::http::StatusCode;
-use common::{make_post, new_app, register_user, uid, TestClient};
+use common::{make_admin, make_published_post, new_app, register_user, uid, TestClient};
 
 async fn make_comment(
     c: &mut TestClient,
@@ -30,9 +30,11 @@ async fn make_comment(
 #[tokio::test]
 async fn nested_three_level_tree_structure() {
     let mut c = TestClient::new(new_app().await);
+    let (admin_token, _) = make_admin(&mut c, &format!("root_{}", uid())).await;
     let (alice, _, _) = register_user(&mut c, &format!("alice_{}", uid())).await;
     let (bob, _, _) = register_user(&mut c, &format!("bob_{}", uid())).await;
-    let (post_id, _) = make_post(&mut c, &alice, &format!("Post {}", uid())).await;
+    let (post_id, _) =
+        make_published_post(&mut c, &alice, &admin_token, &format!("Post {}", uid())).await;
 
     let root = make_comment(&mut c, &bob, &post_id, "root", None).await;
     let child = make_comment(&mut c, &alice, &post_id, "child", Some(&root)).await;
@@ -57,9 +59,11 @@ async fn nested_three_level_tree_structure() {
 #[tokio::test]
 async fn soft_delete_parent_preserves_children() {
     let mut c = TestClient::new(new_app().await);
+    let (admin_token, _) = make_admin(&mut c, &format!("root_{}", uid())).await;
     let (alice, _, _) = register_user(&mut c, &format!("alice_{}", uid())).await;
     let (bob, _, _) = register_user(&mut c, &format!("bob_{}", uid())).await;
-    let (post_id, _) = make_post(&mut c, &alice, &format!("Post {}", uid())).await;
+    let (post_id, _) =
+        make_published_post(&mut c, &alice, &admin_token, &format!("Post {}", uid())).await;
 
     let root = make_comment(&mut c, &bob, &post_id, "root", None).await;
     make_comment(&mut c, &alice, &post_id, "child", Some(&root)).await;
@@ -84,8 +88,10 @@ async fn soft_delete_parent_preserves_children() {
 #[tokio::test]
 async fn hard_delete_leaf_removes_it() {
     let mut c = TestClient::new(new_app().await);
+    let (admin_token, _) = make_admin(&mut c, &format!("root_{}", uid())).await;
     let (alice, _, _) = register_user(&mut c, &format!("alice_{}", uid())).await;
-    let (post_id, _) = make_post(&mut c, &alice, &format!("Post {}", uid())).await;
+    let (post_id, _) =
+        make_published_post(&mut c, &alice, &admin_token, &format!("Post {}", uid())).await;
 
     let leaf = make_comment(&mut c, &alice, &post_id, "lonely", None).await;
     let (status, _) = c
@@ -106,9 +112,11 @@ async fn hard_delete_leaf_removes_it() {
 #[tokio::test]
 async fn comment_rbac_and_validation() {
     let mut c = TestClient::new(new_app().await);
+    let (admin_token, _) = make_admin(&mut c, &format!("root_{}", uid())).await;
     let (alice, _, _) = register_user(&mut c, &format!("alice_{}", uid())).await;
     let (bob, _, _) = register_user(&mut c, &format!("bob_{}", uid())).await;
-    let (post_id, _) = make_post(&mut c, &alice, &format!("Post {}", uid())).await;
+    let (post_id, _) =
+        make_published_post(&mut c, &alice, &admin_token, &format!("Post {}", uid())).await;
 
     // Anonymous cannot comment.
     let (status, _) = c

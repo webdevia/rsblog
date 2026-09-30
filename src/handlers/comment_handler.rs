@@ -1,13 +1,15 @@
 use crate::{
-    auth::middleware::AuthUser,
+    auth::middleware::{try_auth_from_headers, AuthUser},
+    config::Config,
     db::DbPool,
     errors::{AppError, AppResult},
     models::{comment::*, user::Role},
-    repositories::{comment_repo, post_repo},
+    repositories::{comment_repo, post_repo, user_repo},
     validators::validate_request,
 };
 use axum::{
     extract::{Extension, Path, State},
+    http::HeaderMap,
     Json,
 };
 use std::collections::HashMap;
@@ -80,13 +82,38 @@ pub async fn create_comment(
 
 pub async fn get_comments_tree(
     State(pool): State<DbPool>,
+    State(config): State<Config>,
+    headers: HeaderMap,
     Path(post_key): Path<String>,
 ) -> AppResult<Json<Vec<CommentTreeNode>>> {
     let post = post_repo::find_by_id_or_slug(&pool, &post_key)
         .await?
         .ok_or_else(|| AppError::NotFound("Post not found".into()))?;
+    // Mirror post visibility: drafts visible only to owner/moderator/admin.
+    if !post.published {
+        let viewer = try_auth_from_headers(&pool, &config.jwt_secret, &headers).await;
+        match viewer {
+            Some(u) if u.id == post.author_id || u.role.has_permission(&Role::Moderator) => {}
+            _ => return Err(AppError::NotFound("Post not found".into())),
+        }
+    }
     let flat = comment_repo::list_for_post(&pool, &post.id).await?;
     Ok(Json(build_comment_tree(flat)))
+}
+
+async fn ensure_can_moderate_comment(
+    pool: &DbPool,
+    viewer: &AuthUser,
+    comment_author_id: &str,
+) -> AppResult<()> {
+    if viewer.role == Role::Moderator {
+        if let Some(author) = user_repo::find_by_id(pool, comment_author_id).await? {
+            if Role::from_str(&author.role) == Role::Admin {
+                return Err(AppError::Forbidden);
+            }
+        }
+    }
+    Ok(())
 }
 
 pub async fn update_comment(
@@ -105,6 +132,7 @@ pub async fn update_comment(
     if c.author_id != auth_user.id && !auth_user.role.has_permission(&Role::Moderator) {
         return Err(AppError::Forbidden);
     }
+    ensure_can_moderate_comment(&pool, &auth_user, &c.author_id).await?;
     comment_repo::update_content(&pool, &comment_id, &req.content).await?;
     Ok(Json(serde_json::json!({"message": "Comment updated"})))
 }
@@ -123,6 +151,7 @@ pub async fn delete_comment(
     if c.author_id != auth_user.id && !auth_user.role.has_permission(&Role::Moderator) {
         return Err(AppError::Forbidden);
     }
+    ensure_can_moderate_comment(&pool, &auth_user, &c.author_id).await?;
     if comment_repo::has_children(&pool, &comment_id).await? {
         comment_repo::soft_delete(&pool, &comment_id).await?;
     } else {

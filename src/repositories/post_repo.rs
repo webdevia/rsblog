@@ -114,6 +114,42 @@ pub async fn find_by_id_or_slug(pool: &DbPool, key: &str) -> AppResult<Option<Po
     Ok(post)
 }
 
+pub async fn update_content(
+    pool: &DbPool,
+    id: &str,
+    title: &str,
+    slug: &str,
+    content: &str,
+    excerpt: Option<&str>,
+) -> AppResult<()> {
+    db_query!(pool, |p| {
+        sqlx::query(
+            "UPDATE posts SET title=$1, slug=$2, content=$3, excerpt=$4, \
+             updated_at=CURRENT_TIMESTAMP WHERE id=$5",
+        )
+        .bind(title)
+        .bind(slug)
+        .bind(content)
+        .bind(excerpt)
+        .bind(id)
+        .execute(p)
+        .await?;
+    });
+    Ok(())
+}
+
+pub async fn set_published(pool: &DbPool, id: &str, published: bool) -> AppResult<()> {
+    db_query!(pool, |p| {
+        sqlx::query("UPDATE posts SET published=$1, updated_at=CURRENT_TIMESTAMP WHERE id=$2")
+            .bind(published)
+            .bind(id)
+            .execute(p)
+            .await?;
+    });
+    Ok(())
+}
+
+#[allow(dead_code)]
 pub async fn update(
     pool: &DbPool,
     id: &str,
@@ -123,21 +159,8 @@ pub async fn update(
     excerpt: Option<&str>,
     published: bool,
 ) -> AppResult<()> {
-    db_query!(pool, |p| {
-        sqlx::query(
-            "UPDATE posts SET title=$1, slug=$2, content=$3, excerpt=$4, published=$5, \
-             updated_at=CURRENT_TIMESTAMP WHERE id=$6",
-        )
-        .bind(title)
-        .bind(slug)
-        .bind(content)
-        .bind(excerpt)
-        .bind(published)
-        .bind(id)
-        .execute(p)
-        .await?;
-    });
-    Ok(())
+    update_content(pool, id, title, slug, content, excerpt).await?;
+    set_published(pool, id, published).await
 }
 
 pub async fn delete(pool: &DbPool, id: &str) -> AppResult<()> {
@@ -255,9 +278,11 @@ pub async fn comment_count(pool: &DbPool, post_id: &str) -> AppResult<i64> {
     Ok(count)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn list(
     pool: &DbPool,
-    published_only: bool,
+    viewer_id: Option<&str>,
+    can_see_all: bool,
     author: Option<&str>,
     tag: Option<&str>,
     search: Option<&str>,
@@ -270,7 +295,17 @@ pub async fn list(
     let mut params: Vec<String> = Vec::new();
     let mut idx = 0usize;
 
-    if published_only {
+    // Visibility scope:
+    // - moderator/admin -> no filter (see everything)
+    // - authenticated user -> published OR own drafts
+    // - anonymous -> published only
+    if can_see_all {
+        // no visibility condition
+    } else if let Some(vid) = viewer_id {
+        idx += 1;
+        conditions.push(format!("(p.published = TRUE OR p.author_id = ${idx})"));
+        params.push(vid.to_string());
+    } else {
         conditions.push("p.published = TRUE".to_string());
     }
     if let Some(a) = author {

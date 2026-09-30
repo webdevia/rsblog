@@ -3,7 +3,7 @@
 mod common;
 
 use axum::http::StatusCode;
-use common::{make_admin, make_post, new_app, register_user, uid, TestClient};
+use common::{make_admin, make_post, make_published_post, new_app, register_user, uid, TestClient};
 
 #[tokio::test]
 async fn create_post_requires_auth() {
@@ -21,8 +21,15 @@ async fn create_post_requires_auth() {
 #[tokio::test]
 async fn create_and_fetch_post_by_slug_and_id() {
     let mut c = TestClient::new(new_app().await);
+    let (admin_token, _) = make_admin(&mut c, &format!("root_{}", uid())).await;
     let (token, _, _) = register_user(&mut c, &format!("author_{}", uid())).await;
-    let (post_id, slug) = make_post(&mut c, &token, &format!("Hello World {}", uid())).await;
+    let (post_id, slug) = make_published_post(
+        &mut c,
+        &token,
+        &admin_token,
+        &format!("Hello World {}", uid()),
+    )
+    .await;
 
     for key in [&slug, &post_id] {
         let (status, body) = c.get(&format!("/api/v1/posts/{key}"), None).await;
@@ -184,12 +191,25 @@ async fn retitle_slug_collision_is_deduped() {
 #[tokio::test]
 async fn list_supports_search_pagination_and_filters() {
     let mut c = TestClient::new(new_app().await);
+    let (admin_token, _) = make_admin(&mut c, &format!("root_{}", uid())).await;
     let (token, _, username) = register_user(&mut c, &format!("author_{}", uid())).await;
     let tag = uid();
     for i in 0..5 {
-        make_post(&mut c, &token, &format!("Tokio Deep Dive {tag} {i}")).await;
+        make_published_post(
+            &mut c,
+            &token,
+            &admin_token,
+            &format!("Tokio Deep Dive {tag} {i}"),
+        )
+        .await;
     }
-    make_post(&mut c, &token, &format!("Unrelated Cooking {tag}")).await;
+    make_published_post(
+        &mut c,
+        &token,
+        &admin_token,
+        &format!("Unrelated Cooking {tag}"),
+    )
+    .await;
 
     // Search is case-insensitive.
     for term in ["tokio", "TOKIO", "ToKiO"] {
@@ -212,9 +232,8 @@ async fn list_supports_search_pagination_and_filters() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body["total"].as_i64().unwrap() >= 6, "{body}");
 
-    // Drafts excluded by default, included with published=false... but only
-    // owners/moderators could fetch them individually; list with
-    // published=false returns everything.
+    // Drafts are excluded from anonymous lists even with ?published=false
+    // (visibility is viewer-scoped, the query param is ignored).
     let (status, _) = c
         .post(
             "/api/v1/posts",
@@ -227,5 +246,22 @@ async fn list_supports_search_pagination_and_filters() {
     let (status2, pub_body) = c.get("/api/v1/posts", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(status2, StatusCode::OK);
-    assert!(all_body["total"].as_i64().unwrap() > pub_body["total"].as_i64().unwrap());
+    assert_eq!(
+        all_body["total"].as_i64().unwrap(),
+        pub_body["total"].as_i64().unwrap(),
+        "anon must not see drafts even with ?published=false: {all_body} vs {pub_body}"
+    );
+    // Owner sees own draft in list, moderator/admin see all.
+    let (status, own_body) = c.get("/api/v1/posts?published=false", Some(&token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        own_body["total"].as_i64().unwrap() > pub_body["total"].as_i64().unwrap(),
+        "{own_body} vs {pub_body}"
+    );
+    let (status, mod_body) = c.get("/api/v1/posts", Some(&admin_token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        mod_body["total"].as_i64().unwrap() >= own_body["total"].as_i64().unwrap(),
+        "{mod_body} vs {own_body}"
+    );
 }

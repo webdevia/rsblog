@@ -66,6 +66,14 @@ pub fn create_router(state: AppState) -> Router {
                 .put(post_handler::update_post.layer(auth_layer.clone()))
                 .delete(post_handler::delete_post.layer(auth_layer.clone())),
         )
+        .route(
+            "/posts/{id}/publish",
+            post(post_handler::publish_post.layer(auth_layer.clone())),
+        )
+        .route(
+            "/posts/{id}/unpublish",
+            post(post_handler::unpublish_post.layer(auth_layer.clone())),
+        )
         // --- Comments ---
         .route(
             "/posts/{post_id}/comments",

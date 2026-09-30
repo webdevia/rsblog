@@ -103,7 +103,6 @@ pub async fn activate(pool: &DbPool, id: &str) -> AppResult<u64> {
     Ok(rows)
 }
 
-
 pub async fn count_admins(pool: &DbPool) -> AppResult<i64> {
     let count = db_query!(pool, |p| {
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users WHERE role = 'admin'")
