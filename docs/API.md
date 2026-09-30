@@ -72,6 +72,9 @@ logs. See [Observability](#observability).
 | `POST /posts` | `401` | draft only (`published:true` forced to `false`) | `published?` honored | `published?` honored |
 | `PUT/DELETE /posts`, `publish/unpublish`, comment `PUT/DELETE` | `401`/`404` | own only | all except admin-owned (`403`) | all |
 | `GET /posts/{id}/comments` | published tree only, draft → `404` | same + own drafts | all | all |
+| `GET /comments` (flat) | `401` | own on visible posts | all incl. drafts | all incl. drafts |
+| `GET /comments/{id}` | `401` | published: any authed; draft: post author only (`404` else) | ✅ | ✅ |
+| `PUT/DELETE /comments/{id}` | `401` | own only | all except admin-authored (`403`) | all |
 | `POST /posts/{id}/comments` | `401` | published posts only (draft → `404`) | same | same |
 | `POST/PUT /tags` | `401`/`403` | `403` | ✅ | ✅ |
 | `DELETE /tags` | `401`/`403` | `403` | `403` | ✅ |
@@ -261,6 +264,41 @@ moderator on admin-authored comment → `403`. Success: `{ "message": "Comment u
 
 Same guards as edit. Leaf → hard-delete; parent → soft-delete (`[deleted]`).
 Success: `{ "message": "Comment deleted" }`.
+
+### Flat comment management — authenticated (no per-post fetching)
+
+Cross-post flat views for moderation and "my comments" pages. Anon → `401`
+on all of them. List items carry their post context
+(`post: {id, slug, title, published}`) so no post fetching is needed:
+
+```json
+{ "comments": [ { "id": "uuid", "content": "hi",
+  "author": { "id": "uuid", "username": "bob" },
+  "post": { "id": "uuid", "slug": "hello", "title": "Hello", "published": true },
+  "parent_id": null, "depth": 0, "is_deleted": false, "created_at": "..." } ],
+  "total": 1, "page": 1, "per_page": 20 }
+```
+
+#### `GET /api/v1/comments` — user+
+
+Paginated (`?page&per_page&order`, same defaults): moderators/admins see all
+comments including drafts; plain users see only their own on visible posts
+(own comments on others' drafts are hidden, mirroring the tree rule).
+Filters: `?author=` (username), `?post=` (post id/slug), `?search=`
+(content substring, case-insensitive), `?deleted=true|false` (default hides
+soft-deleted `[deleted]` bodies).
+
+#### `GET /api/v1/comments/{id}` — user+
+
+`{ item: <list item>, updated_at }`. Published-post comments: any
+authenticated viewer. Draft-post comments: post author or moderator+,
+else `404`. Unknown id → `404`.
+
+#### `PUT /api/v1/comments/{id}`, `DELETE /api/v1/comments/{id}` — owner/mod/admin
+
+Flat aliases resolving the post internally; identical guards and
+soft/hard-delete semantics to the nested endpoints (incl. mod≠admin
+`403` and `comment.delete` audit entries).
 
 ## Tags
 
@@ -525,6 +563,20 @@ curl -s -X PUT $BASE/posts/$POST_ID/comments/$CID -H "Authorization: Bearer $TOK
 ```bash
 curl -s -X DELETE $BASE/posts/$POST_ID/comments/$CID -H "Authorization: Bearer $TOKEN" | jq .
 # 200 -> { "message": "Comment deleted" } (leaf: hard-delete; parent: soft-delete -> "[deleted]")
+```
+
+### Flat comment management (`GET /comments`, `/comments/{id}`)
+
+```bash
+# moderators/admins: everything incl. drafts; users: own on visible posts; anon: 401
+curl -s "$BASE/comments?author=alice&per_page=5" -H "Authorization: Bearer $ADMIN" | jq .total
+curl -s "$BASE/comments?post=$POST_ID&search=hi" -H "Authorization: Bearer $TOKEN" | jq '.comments[0].post.title'
+# ?deleted=true shows only soft-deleted; ?order=asc oldest-first
+curl -s $BASE/comments/$CID -H "Authorization: Bearer $TOKEN" | jq '.item.post.slug'
+# flat edit/delete (same guards as nested)
+curl -s -X PUT $BASE/comments/$CID -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"content":"edited flat"}' | jq .
+curl -s -X DELETE $BASE/comments/$CID -H "Authorization: Bearer $TOKEN" | jq .
 ```
 
 ### `GET /tags`, `GET /tags/{id_or_slug}`

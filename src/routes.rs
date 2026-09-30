@@ -106,6 +106,18 @@ pub fn create_router(state: AppState) -> Router {
                 .delete(comment_handler::delete_comment)
                 .layer(auth_layer.clone()), // Applies authentication to both PUT and DELETE
         )
+        // --- Flat comment management (no per-post fetching) ---
+        .route(
+            "/comments",
+            get(comment_handler::list_comments.layer(auth_layer.clone())),
+        )
+        .route(
+            "/comments/{comment_id}",
+            get(comment_handler::get_comment_flat)
+                .put(comment_handler::update_comment_flat)
+                .delete(comment_handler::delete_comment_flat)
+                .layer(auth_layer.clone()),
+        )
         // --- Tags ---
         .route(
             "/tags",
