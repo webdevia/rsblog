@@ -161,6 +161,15 @@ pub async fn delete_comment(
     } else {
         comment_repo::hard_delete(&pool, &comment_id).await?;
     }
+    crate::repositories::audit_repo::record(
+        &pool,
+        &auth_user.id,
+        "comment.delete",
+        "comment",
+        &comment_id,
+        None,
+    )
+    .await;
     Ok(Json(serde_json::json!({"message": "Comment deleted"})))
 }
 

@@ -109,6 +109,8 @@ pub struct Config {
     pub comment_rate_per_min: u32,
     /// Max posts per user per hour. `0` disables. Default `10`.
     pub post_rate_per_hour: u32,
+    /// Max reports per user per hour. `0` disables. Default `20`.
+    pub report_rate_per_hour: u32,
     /// Accounts at least this old (days) skip write throttles. Default `30`.
     pub trusted_account_days: i64,
     /// Accounts with at least this many published posts skip throttles. Default `5`.
@@ -205,6 +207,7 @@ impl Config {
             auth_rate_limit_burst: parse_rate("AUTH_RATE_BURST", "5"),
             comment_rate_per_min: parse_limit("COMMENT_RATE_PER_MIN", "5"),
             post_rate_per_hour: parse_limit("POST_RATE_PER_HOUR", "10"),
+            report_rate_per_hour: parse_limit("REPORT_RATE_PER_HOUR", "20"),
             trusted_account_days: parse_limit_i64("TRUSTED_ACCOUNT_DAYS", "30"),
             trusted_published_count: parse_limit_i64("TRUSTED_PUBLISHED_COUNT", "5"),
             duplicate_window_min: parse_limit_i64("DUPLICATE_WINDOW_MIN", "60"),

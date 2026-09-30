@@ -119,6 +119,15 @@ pub async fn update_user_role(
     if user_repo::update_role(&pool, &user_id, &req.role).await? == 0 {
         return Err(AppError::NotFound("User not found".into()));
     }
+    crate::repositories::audit_repo::record(
+        &pool,
+        &auth_user.id,
+        "user.role",
+        "user",
+        &user_id,
+        Some(&format!("{} -> {}", current.as_str(), req.role)),
+    )
+    .await;
     let user = user_repo::find_by_id(&pool, &user_id)
         .await?
         .ok_or(AppError::NotFound("User not found".into()))?;
@@ -147,6 +156,15 @@ pub async fn deactivate_user(
     if user_repo::deactivate(&pool, &target.id).await? == 0 {
         return Err(AppError::NotFound("User not found".into()));
     }
+    crate::repositories::audit_repo::record(
+        &pool,
+        &auth_user.id,
+        "user.deactivate",
+        "user",
+        &target.id,
+        None,
+    )
+    .await;
     Ok(Json(serde_json::json!({"message": "User deactivated"})))
 }
 
@@ -159,6 +177,15 @@ pub async fn activate_user(
     if user_repo::activate(&pool, &target.id).await? == 0 {
         return Err(AppError::NotFound("User not found".into()));
     }
+    crate::repositories::audit_repo::record(
+        &pool,
+        &auth_user.id,
+        "user.activate",
+        "user",
+        &target.id,
+        None,
+    )
+    .await;
     Ok(Json(serde_json::json!({"message": "User activated"})))
 }
 
@@ -192,6 +219,15 @@ pub async fn delete_user(
         if user_repo::hard_delete(&pool, &target.id).await? == 0 {
             return Err(AppError::NotFound("User not found".into()));
         }
+        crate::repositories::audit_repo::record(
+            &pool,
+            &auth_user.id,
+            "user.hard_delete",
+            "user",
+            &target.id,
+            Some(&format!("posts={posts}, comments={comments}")),
+        )
+        .await;
         return Ok(Json(serde_json::json!({
             "message": "User hard-deleted",
             "mode": "hard",
@@ -206,10 +242,59 @@ pub async fn delete_user(
         return Err(AppError::NotFound("User not found".into()));
     }
     let (posts, comments) = user_repo::reassign_content(&pool, &target.id).await?;
+    crate::repositories::audit_repo::record(
+        &pool,
+        &auth_user.id,
+        "user.soft_delete",
+        "user",
+        &target.id,
+        Some(&format!("posts={posts}, comments={comments}")),
+    )
+    .await;
     Ok(Json(serde_json::json!({
         "message": "User soft-deleted",
         "mode": "soft",
         "posts_reassigned": posts,
         "comments_reassigned": comments,
     })))
+}
+
+pub async fn list_audit(
+    State(pool): State<DbPool>,
+    Extension(auth_user): Extension<AuthUser>,
+    Query(q): Query<crate::models::audit::AuditQuery>,
+) -> AppResult<Json<crate::models::audit::AuditListResponse>> {
+    require_role(&auth_user, Role::Moderator)?;
+    let page = q.page.unwrap_or(1).max(1);
+    let per_page = q.per_page.unwrap_or(20).clamp(1, 100);
+    let ascending = match q.order.as_deref().map(str::to_lowercase).as_deref() {
+        None | Some("desc") => false,
+        Some("asc") => true,
+        Some(_) => {
+            return Err(AppError::BadRequest(
+                "Invalid order (expected 'asc' or 'desc')".into(),
+            ));
+        }
+    };
+    // Moderators see only their own actions; admins may filter by actor/action.
+    let actor = if auth_user.role == Role::Moderator {
+        Some(auth_user.id.clone())
+    } else {
+        q.actor.clone()
+    };
+    let (entries, total) = crate::repositories::audit_repo::list(
+        &pool,
+        actor.as_deref(),
+        q.action.as_deref(),
+        page,
+        per_page,
+        ascending,
+    )
+    .await?;
+    Ok(Json(crate::models::audit::AuditListResponse {
+        entries,
+        total,
+        page,
+        per_page,
+    }))
 }

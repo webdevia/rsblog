@@ -55,6 +55,7 @@ fn test_config(db_path: &str) -> Config {
         auth_rate_limit_burst: 1000,
         comment_rate_per_min: 1000,
         post_rate_per_hour: 1000,
+        report_rate_per_hour: 1000,
         trusted_account_days: 30,
         trusted_published_count: 5,
         duplicate_window_min: 0,
@@ -113,6 +114,7 @@ pub async fn new_strict_app() -> TestApp {
     let mut config = test_config(&db_path);
     config.comment_rate_per_min = 3;
     config.post_rate_per_hour = 3;
+    config.report_rate_per_hour = 3;
     config.duplicate_window_min = 60;
     config.max_links_new_user = 1;
     config.auth_rate_limit_rps = 1;

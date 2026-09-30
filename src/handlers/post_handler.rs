@@ -232,6 +232,15 @@ pub async fn delete_post(
     ensure_can_moderate_post(&pool, &auth_user, &post.author_id).await?;
 
     post_repo::delete(&pool, &post.id).await?;
+    crate::repositories::audit_repo::record(
+        &pool,
+        &auth_user.id,
+        "post.delete",
+        "post",
+        &post.id,
+        None,
+    )
+    .await;
     Ok(Json(serde_json::json!({"message": "Post deleted"})))
 }
 
@@ -248,6 +257,15 @@ pub async fn publish_post(
         .ok_or_else(|| AppError::NotFound("Post not found".into()))?;
     ensure_can_moderate_post(&pool, &auth_user, &post.author_id).await?;
     post_repo::set_published(&pool, &post.id, true).await?;
+    crate::repositories::audit_repo::record(
+        &pool,
+        &auth_user.id,
+        "post.publish",
+        "post",
+        &post.id,
+        None,
+    )
+    .await;
     build_post_response(&pool, &post.id).await
 }
 
@@ -264,6 +282,15 @@ pub async fn unpublish_post(
         .ok_or_else(|| AppError::NotFound("Post not found".into()))?;
     ensure_can_moderate_post(&pool, &auth_user, &post.author_id).await?;
     post_repo::set_published(&pool, &post.id, false).await?;
+    crate::repositories::audit_repo::record(
+        &pool,
+        &auth_user.id,
+        "post.unpublish",
+        "post",
+        &post.id,
+        None,
+    )
+    .await;
     build_post_response(&pool, &post.id).await
 }
 

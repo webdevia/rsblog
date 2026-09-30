@@ -40,6 +40,7 @@ logs. See [Observability](#observability).
 - [RBAC matrix](#rbac-matrix)
 - [Observability](#observability)
 - [Anti-spam](#anti-spam)
+- [Reports & moderation queue](#reports--moderation-queue)
 - [Health](#health)
 - [Auth](#auth)
 - [Posts](#posts)
@@ -74,7 +75,9 @@ logs. See [Observability](#observability).
 | `POST /posts/{id}/comments` | `401` | published posts only (draft → `404`) | same | same |
 | `POST/PUT /tags` | `401`/`403` | `403` | ✅ | ✅ |
 | `DELETE /tags` | `401`/`403` | `403` | `403` | ✅ |
-| `/admin/*` | `401` | `403` | list/view/promote/ban on users; `403` on demote, admin-role grants, admin targets, all deletes | ✅ (not self; not last admin for delete) |
+| `/admin/*` | `401` | `403` | list/view/promote/ban on users + own audit; `403` on demote, admin-role grants, admin targets, all deletes, others' audit | ✅ (not self; not last admin for delete) |
+| `POST /reports` | `401` | ✅ (throttled) | ✅ | ✅ |
+| `/moderation/reports` | `401` | `403` | ✅ triage queue | ✅ |
 
 ## Observability
 
@@ -117,6 +120,7 @@ accounts. All `429`s carry a `Retry-After: 60` header and the standard error bod
 | Post throttle | per user | 10/hour | `POST_RATE_PER_HOUR` (`0` off) |
 | Duplicates | per user, posts+comments | 60 min window | `DUPLICATE_WINDOW_MIN` (`0` off) → `409` |
 | Link cap | untrusted users | 3 links/post-or-comment | `MAX_LINKS_NEW_USER` (`0` off) → `422` |
+| Report throttle | per user | 20/hour | `REPORT_RATE_PER_HOUR` (`0` off) |
 
 Trusted users skip write throttles and link caps (duplicates still apply):
 moderators/admins, accounts older than `TRUSTED_ACCOUNT_DAYS` (default 30), or
@@ -276,6 +280,30 @@ Request: `{ "name": "web-frameworks" }` (re-slugifies). Same guards as create.
 
 Moderator → `403`. Success: `{ "message": "Tag deleted" }`.
 
+## Reports & moderation queue
+
+Any authenticated user may flag a post, comment, or account. Moderators and
+admins triage the queue. Report creation is throttled per user
+(`REPORT_RATE_PER_HOUR`, default 20; trusted users exempt).
+
+### `POST /api/v1/reports` — authenticated
+
+Request: `{ "target_type": "post|comment|user", "target_id": "<id or slug>",
+"post_id?": "<required for comments>", "reason": "1–500 chars" }`.
+Unknown kind → `400`; missing target → `404`; repeat open report by the same
+reporter on the same target → `409`. Returns the report with `status: "open"`.
+
+### `GET /api/v1/moderation/reports` — moderator/admin
+
+Paginated queue: `?page&per_page&order` plus `?status=open` (default) |
+`dismissed` | `actioned` | `all`. Returns `{ reports, total, page, per_page }`.
+
+### `POST /api/v1/moderation/reports/{id}/dismiss|action` — moderator/admin
+
+Idempotent transitions (`dismissed` = no violation, `actioned` = handled —
+actual moderation happens via the posts/comments/users endpoints).
+Unknown id → `404`. Both write audit entries.
+
 ## Admin
 
 All user endpoints: moderator+ (`401` anon, `403` plain users).
@@ -332,6 +360,15 @@ Moderators (and plain users) → `403`. Default `mode=soft`; invalid mode →
   { "message": "User hard-deleted", "mode": "hard",
     "posts_deleted": 3, "comments_deleted": 12 }
   ```
+
+### `GET /api/v1/admin/audit` — moderator/admin
+
+Paginated audit trail: `?page&per_page&order` plus `?action=` exact filter.
+Moderators see only their own actions (`?actor=` is forced to self);
+admins see everything and may filter `?actor=<id>`. Entries survive
+hard-deletes (actor username is `null` once the account is purged).
+Recorded actions: `post.publish|unpublish|delete`, `comment.delete`,
+`user.role|deactivate|activate|soft_delete|hard_delete`, `report.dismiss|action`.
 
 ## Examples
 
@@ -580,6 +617,22 @@ curl -s -X "DELETE $BASE/admin/users/$UID?mode=hard" -H "Authorization: Bearer $
 #          "posts_deleted": 1, "comments_deleted": 2 }
 # posts/comments gone; email reusable; repeat -> 404
 # moderators/users -> 403; self/last-admin/bad-mode -> 400
+```
+
+### `POST /reports`, moderation queue, audit
+
+```bash
+RID=$(curl -s -X POST $BASE/reports -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "{\"target_type\":\"post\",\"target_id\":\"$POST_ID\",\"reason\":\"spam\"}" | jq -r .id)
+# 200 -> { "status": "open", ... }; repeat open report -> 409
+curl -s "$BASE/moderation/reports" -H "Authorization: Bearer $ADMIN" | jq .total
+# open queue; ?status=all|dismissed|actioned; users -> 403
+curl -s -X POST $BASE/moderation/reports/$RID/dismiss -H "Authorization: Bearer $ADMIN" \
+  -H 'Content-Type: application/json' -d '{}' | jq .status
+# -> "dismissed" (or /action -> "actioned"); idempotent
+curl -s "$BASE/admin/audit?action=report.dismiss" -H "Authorization: Bearer $ADMIN" | jq '.entries[0]'
+# moderators see only their own entries
 ```
 
 ### End-to-end publishing flow (all roles)

@@ -117,10 +117,31 @@ pub fn create_router(state: AppState) -> Router {
                 .put(tag_handler::update_tag.layer(auth_layer.clone()))
                 .delete(tag_handler::delete_tag.layer(auth_layer.clone())),
         )
+        // --- Reports (Authenticated) + Moderation Queue (Moderator+) ---
+        .route(
+            "/reports",
+            post(report_handler::create_report.layer(auth_layer.clone())),
+        )
+        .route(
+            "/moderation/reports",
+            get(report_handler::list_reports.layer(auth_layer.clone())),
+        )
+        .route(
+            "/moderation/reports/{id}/dismiss",
+            post(report_handler::dismiss_report.layer(auth_layer.clone())),
+        )
+        .route(
+            "/moderation/reports/{id}/action",
+            post(report_handler::action_report.layer(auth_layer.clone())),
+        )
         // --- Admin Console (Authenticated / Moderator+) ---
         .route(
             "/admin/users",
             get(user_handler::list_users.layer(auth_layer.clone())),
+        )
+        .route(
+            "/admin/audit",
+            get(user_handler::list_audit.layer(auth_layer.clone())),
         )
         .route(
             "/admin/users/{id}",
